@@ -1,5 +1,6 @@
 package dev.blazelight.p4oc.data.session
 
+import dev.blazelight.p4oc.core.lifecycle.ForegroundState
 import dev.blazelight.p4oc.core.log.AppLog
 import dev.blazelight.p4oc.core.network.HTTP_NOT_FOUND
 import dev.blazelight.p4oc.data.files.ofish.OfishSessionNames
@@ -48,6 +49,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -66,6 +68,8 @@ class SessionRepositoryImpl(
     private val questionFetcher: (suspend () -> List<QuestionRequestDto>)? = null,
     /** This repository's own server's user workspace roots; statuses are hydrated for each. */
     private val userWorkspaceRoots: suspend () -> List<String> = { emptyList() },
+    /** O10 partial pause: non-essential REST refreshes are deferred while backgrounded. */
+    private val foregroundState: ForegroundState = ForegroundState.AlwaysForeground,
 ) : SessionRepository {
     data class CachedSnapshot(
         val snapshot: Snapshot,
@@ -86,6 +90,42 @@ class SessionRepositoryImpl(
 
     private val _state = MutableStateFlow<RepoState>(RepoState.Hydrating())
     override val state: StateFlow<RepoState> = _state.asStateFlow()
+
+    @Volatile
+    private var isForeground: Boolean = true
+
+    @Volatile
+    private var deferredForegroundRefresh: Boolean = false
+
+    init {
+        scope.launch {
+            foregroundState.isForeground.collect { foreground ->
+                val wasForeground = isForeground
+                isForeground = foreground
+                if (foreground && !wasForeground) {
+                    runForegroundCatchUp()
+                }
+            }
+        }
+    }
+
+    private fun runForegroundCatchUp() {
+        if (!deferredForegroundRefresh) return
+        deferredForegroundRefresh = false
+        scope.launch {
+            runCatching { refresh() }
+                .onFailure { error ->
+                    if (error is CancellationException) throw error
+                    AppLog.w(TAG, "Foreground catch-up refresh failed: ${error.javaClass.simpleName}")
+                }
+        }
+    }
+
+    private fun deferWhileBackground(): Boolean {
+        if (isForeground) return false
+        deferredForegroundRefresh = true
+        return true
+    }
 
     @Volatile
     private var inFlight: Deferred<Result<CachedSnapshot>>? = null
@@ -200,6 +240,7 @@ class SessionRepositoryImpl(
             sessionListLimit = SESSION_INITIAL_LIMIT
             sessionListHasMore = true
         }
+        deferredForegroundRefresh = false
     }
 
     override suspend fun refresh() {
@@ -276,6 +317,7 @@ class SessionRepositoryImpl(
         if (event is OpenCodeEvent.ProjectUpdated || event is OpenCodeEvent.ProjectDirectoriesUpdated ||
             event is OpenCodeEvent.ProjectRefreshRequested
         ) {
+            if (deferWhileBackground()) return
             projectRefreshJob?.cancel()
             projectRefreshJob = scope.launch {
                 delay(PROJECT_EVENT_REFRESH_DEBOUNCE_MS)
@@ -288,7 +330,7 @@ class SessionRepositoryImpl(
             return
         }
         if (event is OpenCodeEvent.SessionRefreshRequested && !event.removed) {
-            requestSessionRefresh(event.sessionID)
+            if (!deferWhileBackground()) requestSessionRefresh(event.sessionID)
             return
         }
         if (event is OpenCodeEvent.MessageRefreshRequested) {

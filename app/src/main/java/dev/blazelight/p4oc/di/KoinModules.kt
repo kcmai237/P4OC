@@ -3,6 +3,8 @@ package dev.blazelight.p4oc.di
 import androidx.lifecycle.SavedStateHandle
 import dev.blazelight.p4oc.core.datastore.SettingsDataStore
 import dev.blazelight.p4oc.core.haptic.HapticFeedback
+import dev.blazelight.p4oc.core.lifecycle.ForegroundState
+import dev.blazelight.p4oc.core.lifecycle.MutableForegroundState
 import dev.blazelight.p4oc.core.network.ConnectionManager
 import dev.blazelight.p4oc.core.network.MdnsDiscoveryManager
 import dev.blazelight.p4oc.core.network.PtyWebSocketClient
@@ -98,7 +100,17 @@ val networkModule = module {
         activeServerApiProvider(get())
     }
     single<UserWorkspaceRootsSource> { SettingsUserWorkspaceRootsSource(get()) }
-    single { SessionRepositoryProvider(get(), get(), get(), userWorkspaceRoots = get(), json = get()) }
+    single<ForegroundState> { MutableForegroundState() }
+    single {
+        SessionRepositoryProvider(
+            get(),
+            get(),
+            get(),
+            userWorkspaceRoots = get(),
+            json = get(),
+            foregroundState = get(),
+        )
+    }
 }
 
 val viewModelModule = module {

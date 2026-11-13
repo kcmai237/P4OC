@@ -91,6 +91,7 @@ import androidx.navigation.compose.rememberNavController
 import dev.blazelight.p4oc.R
 import dev.blazelight.p4oc.core.datastore.SavedServer
 import dev.blazelight.p4oc.core.datastore.SettingsDataStore
+import dev.blazelight.p4oc.core.lifecycle.ForegroundState
 import dev.blazelight.p4oc.core.log.AppLog
 import dev.blazelight.p4oc.core.network.ApiResult
 import dev.blazelight.p4oc.core.network.ConnectionState
@@ -141,6 +142,7 @@ import dev.blazelight.p4oc.ui.workspace.workspaceActionGestures
 import dev.blazelight.p4oc.ui.workspace.workspaceActionMenu
 import dev.blazelight.p4oc.ui.workspace.workspaceClientDirectoryBrowser
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import org.koin.compose.koinInject
@@ -169,6 +171,7 @@ private data class MainTabDeps(
     val settingsDataStore: SettingsDataStore,
     val serverConnectionRegistry: ServerConnectionRegistry,
     val sessionRepositoryProvider: SessionRepositoryProvider,
+    val foregroundState: ForegroundState,
     val coroutineScope: CoroutineScope,
 )
 
@@ -711,6 +714,7 @@ private fun rememberMainTabDeps(): MainTabDeps {
     val settingsDataStore: SettingsDataStore = koinInject()
     val serverConnectionRegistry: ServerConnectionRegistry = koinInject()
     val sessionRepositoryProvider: SessionRepositoryProvider = koinInject()
+    val foregroundState: ForegroundState = koinInject()
     val coroutineScope = rememberCoroutineScope()
     return remember(coroutineScope) {
         MainTabDeps(
@@ -718,6 +722,7 @@ private fun rememberMainTabDeps(): MainTabDeps {
             settingsDataStore = settingsDataStore,
             serverConnectionRegistry = serverConnectionRegistry,
             sessionRepositoryProvider = sessionRepositoryProvider,
+            foregroundState = foregroundState,
             coroutineScope = coroutineScope,
         )
     }
@@ -782,11 +787,17 @@ private val rememberConnectSavedServer: @Composable (
     }
 }
 
-private val mainTabForegroundEffect: @Composable (ServerConnectionRegistry, LifecycleOwner) -> Unit =
-    { serverConnectionRegistry, lifecycleOwner ->
+private val mainTabForegroundEffect: @Composable (ServerConnectionRegistry, ForegroundState, LifecycleOwner) -> Unit =
+    { serverConnectionRegistry, foregroundState, lifecycleOwner ->
         LaunchedEffect(lifecycleOwner) {
             lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                serverConnectionRegistry.onAppForegrounded()
+                foregroundState.setForeground(true)
+                try {
+                    serverConnectionRegistry.onAppForegrounded()
+                    awaitCancellation()
+                } finally {
+                    foregroundState.setForeground(false)
+                }
             }
         }
     }
@@ -1207,7 +1218,7 @@ object MainTabScreen {
         }
 
         LaunchedEffect(Unit) { deps.tabManager.ensureHomeTab(focus = false) }
-        mainTabForegroundEffect(deps.serverConnectionRegistry, lifecycleOwner)
+        mainTabForegroundEffect(deps.serverConnectionRegistry, deps.foregroundState, lifecycleOwner)
 
         val tabs by deps.tabManager.tabs.collectAsStateWithLifecycle()
         val activeTabId by deps.tabManager.activeTabId.collectAsStateWithLifecycle()

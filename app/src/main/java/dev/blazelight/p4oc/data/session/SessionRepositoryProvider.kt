@@ -1,5 +1,6 @@
 package dev.blazelight.p4oc.data.session
 
+import dev.blazelight.p4oc.core.lifecycle.ForegroundState
 import dev.blazelight.p4oc.core.log.AppLog
 import dev.blazelight.p4oc.core.network.ServerConnectionRegistry
 import dev.blazelight.p4oc.data.remote.mapper.MessageMapper
@@ -30,6 +31,7 @@ class SessionRepositoryProvider(
     private val dispatcher: CoroutineDispatcher = Dispatchers.Default,
     private val repositoryDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val json: Json = Json.Default,
+    private val foregroundState: ForegroundState = ForegroundState.AlwaysForeground,
 ) {
     data class Lease(
         val workspaceClient: WorkspaceClient,
@@ -72,6 +74,7 @@ class SessionRepositoryProvider(
                 messageMapper,
                 dispatcher = repositoryDispatcher,
                 userWorkspaceRoots = { userWorkspaceRoots.roots(workspace.server) },
+                foregroundState = foregroundState,
             )
             Entry(
                 workspaceClient = workspaceClient,

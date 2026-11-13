@@ -207,6 +207,7 @@ class SessionRepositoryImpl(
     }
 
     suspend fun loadMoreSessions(): Result<Boolean> {
+        if (!sessionListHasMore) return Result.success(false)
         synchronized(sessionPageLock) {
             if (sessionListLimit >= SESSION_HISTORY_LIMIT) return Result.success(false)
             sessionListLimit = (sessionListLimit + SESSION_PAGE_INCREMENT).coerceAtMost(SESSION_HISTORY_LIMIT)

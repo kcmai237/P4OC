@@ -60,8 +60,23 @@ internal class V2WorkspaceOpenCodeApi(
     private val next: OpenCodeApi,
     http: V2Http,
     private val json: Json,
+    catalogTtlMillis: Long = CATALOG_CACHE_TTL_MILLIS,
+    catalogClock: () -> Long = System::currentTimeMillis,
 ) : V2WorkspaceApiBase(next, http) {
     internal val forms = V2Forms(http, json)
+
+    private val projectCatalogue = RequestCoalescer<Unit, List<ProjectDto>>(
+        ttlMillis = catalogTtlMillis,
+        clock = catalogClock,
+    )
+    private val providerCatalogue = RequestCoalescer<CatalogLocation, ProvidersResponseDto>(
+        ttlMillis = catalogTtlMillis,
+        clock = catalogClock,
+    )
+    private val configCatalogue = RequestCoalescer<CatalogLocation, ConfigDto>(
+        ttlMillis = 0L,
+        clock = catalogClock,
+    )
 
     private val dtoMapper = V2WorkspaceDtoMapper(v2Json)
 
@@ -84,6 +99,10 @@ internal class V2WorkspaceOpenCodeApi(
 
     override suspend fun listProjects(directory: String?, workspace: String?): List<ProjectDto> {
         requireNoWorkspaceId(workspace)
+        return projectCatalogue.get(Unit) { fetchProjects() }
+    }
+
+    private suspend fun fetchProjects(): List<ProjectDto> {
         val response = http.request("GET", "api/project")
         return v2Json.decodeFromJsonElement<List<V2Project>>(response).map { project ->
             dtoMapper.run { project.toProjectDto() }
@@ -118,7 +137,12 @@ internal class V2WorkspaceOpenCodeApi(
         }
     }
 
-    override suspend fun getProviders(directory: String?, workspace: String?): ProvidersResponseDto {
+    override suspend fun getProviders(directory: String?, workspace: String?): ProvidersResponseDto =
+        providerCatalogue.get(CatalogLocation(directory, workspace)) {
+            fetchProviders(directory, workspace)
+        }
+
+    private suspend fun fetchProviders(directory: String?, workspace: String?): ProvidersResponseDto {
         val location = locationQuery(directory, workspace)
         val providerResponse = http.request("GET", "api/provider", location)
         val modelResponse = http.request("GET", "api/model", location)
@@ -139,7 +163,12 @@ internal class V2WorkspaceOpenCodeApi(
         return ProvidersResponseDto(all = providerDtos, default = defaults, connected = connected)
     }
 
-    override suspend fun getConfig(directory: String?, workspace: String?): ConfigDto {
+    override suspend fun getConfig(directory: String?, workspace: String?): ConfigDto =
+        configCatalogue.get(CatalogLocation(directory, workspace)) {
+            fetchConfig(directory, workspace)
+        }
+
+    private suspend fun fetchConfig(directory: String?, workspace: String?): ConfigDto {
         val location = locationQuery(directory, workspace)
         val configResponse = http.request("GET", "api/config", location)
         val entries = v2Json.decodeFromJsonElement<List<V2ConfigEntry>>(configResponse)

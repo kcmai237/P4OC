@@ -19,6 +19,8 @@ import java.util.UUID
 internal class V2SessionCommandSupport(
     private val http: V2Http,
     private val fields: V2SessionDtoMapper,
+    private val adaptivePolling: Boolean = false,
+    private val pollClock: () -> Long = System::currentTimeMillis,
 ) {
     fun promptBody(request: SendMessageRequest): JsonObject {
         requireRepresentablePrompt(request)
@@ -63,11 +65,12 @@ internal class V2SessionCommandSupport(
 
     private suspend fun awaitShellOutput(sessionId: String, messageId: String): String? =
         withTimeoutOrNull(SHELL_COMMAND_TIMEOUT_MS) {
+            val polling = if (adaptivePolling) AdaptiveShellPolling(clock = pollClock) else null
             while (true) {
                 val message = fetchShellMessage(sessionId, messageId)
                 val output = message?.let { shellOutputIfComplete(it, sessionId, messageId) }
                 if (output != null) return@withTimeoutOrNull output
-                delay(SHELL_POLL_INTERVAL_MS)
+                delay(polling?.nextIntervalMillis() ?: SHELL_POLL_INTERVAL_MS)
             }
             error("unreachable")
         }

@@ -363,6 +363,11 @@ class ConnectionManager constructor(
             builder.applyInsecureTls()
         }
 
+        if (BuildConfig.DEBUG) {
+            builder.eventListener(DebugNetworkMetrics.eventListener())
+            builder.addNetworkInterceptor(DebugNetworkMetrics.networkInterceptor())
+        }
+
         return builder.build()
     }
 

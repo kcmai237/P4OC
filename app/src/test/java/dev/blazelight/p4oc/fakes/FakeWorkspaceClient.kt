@@ -115,9 +115,10 @@ class FakeWorkspaceClient(
         listSessionsScopes += scope
         listSessionsCallsLog += ListSessionsCall(directory, scope, roots, start, search, limit)
         listSessionsFailure?.let { throw it }
-        return sessionsByDirectoryAndSearch[Pair(directory, search)]
+        val sessions = sessionsByDirectoryAndSearch[Pair(directory, search)]
             ?: sessionsByDirectory?.get(directory)
             ?: listSessionsResult
+        return limit?.let(sessions::take) ?: sessions
     }
 
     override suspend fun getSession(id: String): SessionDto {

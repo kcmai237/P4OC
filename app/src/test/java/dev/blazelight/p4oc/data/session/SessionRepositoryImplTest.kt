@@ -206,7 +206,7 @@ class SessionRepositoryImplTest {
     }
 
     @Test
-    fun `refresh explicitly requests complete session history for every scope`() = runTest {
+    fun `refresh requests the bounded initial session page for every scope`() = runTest {
         val client = FakeWorkspaceClient().apply {
             projects = listOf(FakeWorkspaceClient.projectDto("p1", "/repo/p1"))
             sessionsByDirectory = mapOf(null to emptyList(), "/repo/p1" to emptyList())
@@ -220,7 +220,7 @@ class SessionRepositoryImplTest {
         repository.refresh()
 
         assertEquals(2, client.listSessionsCallsLog.size)
-        assertTrue(client.listSessionsCallsLog.all { it.limit == Int.MAX_VALUE })
+        assertTrue(client.listSessionsCallsLog.all { it.limit == 50 })
         assertTrue(client.listSessionsCallsLog.all { it.start == null })
     }
 

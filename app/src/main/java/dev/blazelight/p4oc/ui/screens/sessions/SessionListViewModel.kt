@@ -168,6 +168,7 @@ class SessionListViewModel constructor(
                             )
                         },
                         searchResults = if (state.searchQuery.isBlank()) emptyList() else state.searchResults,
+                        hasMoreSessions = sessionRepository.hasMoreSessions,
                         error = if (repoState is RepoState.Stale) {
                             "Could not refresh sessions. Showing the last loaded sessions."
                         } else {
@@ -213,6 +214,7 @@ class SessionListViewModel constructor(
                                     status
                                 )
                             },
+                            hasMoreSessions = sessionRepository.hasMoreSessions,
                             error = null,
                         )
                     }
@@ -232,6 +234,26 @@ class SessionListViewModel constructor(
                     }
                 },
             )
+        }
+    }
+
+    fun loadMoreSessions() {
+        val state = _uiState.value
+        if (state.isLoadingMore || !state.hasMoreSessions) return
+        _uiState.update { it.copy(isLoadingMore = true, error = null) }
+        viewModelScope.launch {
+            val result = sessionRepository.loadMoreSessions()
+            _uiState.update {
+                it.copy(
+                    isLoadingMore = false,
+                    hasMoreSessions = sessionRepository.hasMoreSessions,
+                    error = if (result.isFailure) {
+                        "Could not load more sessions. Check the connection and try again."
+                    } else {
+                        it.error
+                    },
+                )
+            }
         }
     }
 
@@ -547,6 +569,8 @@ data class SessionListUiState(
     val shareUrl: String? = null,
     val expandedSessionIds: Set<String> = emptySet(),
     val forkingSessionIds: Set<String> = emptySet(),
+    val isLoadingMore: Boolean = false,
+    val hasMoreSessions: Boolean = false,
     val error: String? = null
 ) {
     val isSearchActive: Boolean

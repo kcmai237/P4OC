@@ -26,6 +26,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.blazelight.p4oc.R
 import dev.blazelight.p4oc.domain.model.Session
@@ -357,6 +358,26 @@ fun SessionListScreen(
                                     viewModel.toggleSessionExpanded(id)
                                 }
                             )
+                        }
+                        if (!searchActive && uiState.hasMoreSessions) {
+                            item(key = "sessions_load_more") {
+                                TextButton(
+                                    onClick = viewModel::loadMoreSessions,
+                                    enabled = !uiState.isLoadingMore,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("sessions_load_more"),
+                                ) {
+                                    if (uiState.isLoadingMore) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(Spacing.md),
+                                            strokeWidth = 2.dp,
+                                        )
+                                    } else {
+                                        Text(stringResource(R.string.sessions_load_more))
+                                    }
+                                }
+                            }
                         }
                     }
                 }

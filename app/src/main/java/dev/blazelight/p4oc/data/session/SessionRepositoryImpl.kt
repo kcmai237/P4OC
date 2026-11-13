@@ -9,6 +9,7 @@ import dev.blazelight.p4oc.data.remote.dto.InitSessionRequest
 import dev.blazelight.p4oc.data.remote.dto.ProjectDto
 import dev.blazelight.p4oc.data.remote.dto.QuestionRequestDto
 import dev.blazelight.p4oc.data.remote.dto.SendMessageRequest
+import dev.blazelight.p4oc.data.remote.dto.SessionDto
 import dev.blazelight.p4oc.data.remote.dto.UpdateSessionRequest
 import dev.blazelight.p4oc.data.remote.mapper.MessageMapper
 import dev.blazelight.p4oc.data.remote.mapper.PermissionMapper
@@ -74,6 +75,7 @@ class SessionRepositoryImpl(
 
     val workspace = client.workspace
     val supportsSessionSharing: Boolean get() = client.supportsSessionSharing
+    val hasMoreSessions: Boolean get() = sessionListHasMore
 
     private val reducer = SessionReducer(client.workspace)
     private val hydrateBuffer = HydrationEventBuffer()
@@ -90,6 +92,12 @@ class SessionRepositoryImpl(
 
     @Volatile
     private var lastSuccess: CachedSnapshot? = null
+
+    private val sessionPageLock = Any()
+    private var sessionListLimit: Int = SESSION_INITIAL_LIMIT
+
+    @Volatile
+    private var sessionListHasMore: Boolean = true
 
     private val messageStates = mutableMapOf<String, MutableStateFlow<List<MessageWithParts>>>()
     private val sessionUiStates = mutableMapOf<String, MutableStateFlow<SessionUiState>>()
@@ -188,10 +196,28 @@ class SessionRepositoryImpl(
             current
         }
         toCancel?.cancel(CancellationException("Session repository invalidated"))
+        synchronized(sessionPageLock) {
+            sessionListLimit = SESSION_INITIAL_LIMIT
+            sessionListHasMore = true
+        }
     }
 
     override suspend fun refresh() {
         hydrate(client.listProjects())
+    }
+
+    suspend fun loadMoreSessions(): Result<Boolean> {
+        synchronized(sessionPageLock) {
+            if (sessionListLimit >= SESSION_HISTORY_LIMIT) return Result.success(false)
+            sessionListLimit = (sessionListLimit + SESSION_PAGE_INCREMENT).coerceAtMost(SESSION_HISTORY_LIMIT)
+        }
+        val projects = runCatching { client.listProjects() }.getOrElse { error ->
+            return Result.failure(error)
+        }
+        return runCatching {
+            hydrate(projects, announceHydration = false)
+            sessionListHasMore
+        }
     }
 
     suspend fun searchSessionsInWorkspace(query: String, directory: String): List<WorkspaceSession> {
@@ -1136,13 +1162,20 @@ class SessionRepositoryImpl(
         "CyclomaticComplexMethod",
         "LongMethod", // Atomic generation and buffer ownership branches must remain co-located.
     )
-    private suspend fun hydrate(seedProjects: List<ProjectDto>): CachedSnapshot {
+    private suspend fun hydrate(
+        seedProjects: List<ProjectDto>,
+        announceHydration: Boolean = true,
+    ): CachedSnapshot {
+        val pageLimit = synchronized(sessionPageLock) { sessionListLimit }
         val generation = synchronized(hydrationTransitionLock) {
             val nextGeneration = ++hydrationGeneration
-            _state.value = RepoState.Hydrating(snapshot = state.value.snapshot, bufferedEvents = hydrateBuffer.size)
+            if (announceHydration) {
+                _state.value = RepoState.Hydrating(snapshot = state.value.snapshot, bufferedEvents = hydrateBuffer.size)
+            }
             nextGeneration
         }
         val workspaceKey = client.workspace.key.toString()
+        val limitReached = AtomicBoolean(false)
 
         try {
             val projects = seedProjects.sortedByDescending { it.worktree }
@@ -1151,7 +1184,24 @@ class SessionRepositoryImpl(
             val totalSteps = (projects.size + 1) + statusDirectories.size
             val completedSteps = AtomicInteger(0)
 
+            suspend fun fetchSessionPage(
+                directory: String?,
+                scope: String?,
+            ): List<SessionDto> {
+                val sessions = client.listSessions(
+                    directory = directory,
+                    roots = true,
+                    limit = pageLimit,
+                    scope = scope,
+                )
+                if (pageLimit < SESSION_HISTORY_LIMIT && sessions.size >= pageLimit) {
+                    limitReached.set(true)
+                }
+                return sessions
+            }
+
             fun updateHydrationState(currentStep: String? = null, completed: Int = completedSteps.get()) {
+                if (!announceHydration) return
                 synchronized(hydrationTransitionLock) {
                     if (generation != hydrationGeneration) return
                     val current = _state.value as? RepoState.Hydrating
@@ -1181,7 +1231,7 @@ class SessionRepositoryImpl(
                     val globalDeferred = async {
                         trackedStep("Loading global sessions") {
                             semaphore.withPermit {
-                                client.listSessions(directory = null, roots = true, limit = SESSION_HISTORY_LIMIT)
+                                fetchSessionPage(directory = null, scope = null)
                             }
                         }
                     }
@@ -1189,12 +1239,7 @@ class SessionRepositoryImpl(
                         async {
                             trackedStep("Loading sessions for ${project.worktree.substringAfterLast('/')}") {
                                 semaphore.withPermit {
-                                    client.listSessions(
-                                        directory = project.worktree,
-                                        roots = true,
-                                        limit = SESSION_HISTORY_LIMIT,
-                                        scope = "project",
-                                    )
+                                    fetchSessionPage(directory = project.worktree, scope = "project")
                                 }
                             } to project
                         }
@@ -1250,6 +1295,12 @@ class SessionRepositoryImpl(
 
             check(client.workspace.key.toString() == workspaceKey) { "Workspace switched during session hydrate" }
 
+            synchronized(hydrationTransitionLock) {
+                if (generation == hydrationGeneration) {
+                    sessionListHasMore = pageLimit < SESSION_HISTORY_LIMIT && limitReached.get()
+                }
+            }
+
             val hydrated = Snapshot(
                 sessions = sessions,
                 projects = projects,
@@ -1291,9 +1342,11 @@ class SessionRepositoryImpl(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            synchronized(hydrationTransitionLock) {
-                if (generation == hydrationGeneration) {
-                    _state.value = RepoState.Stale(state.value.snapshot, reason = e.message)
+            if (announceHydration) {
+                synchronized(hydrationTransitionLock) {
+                    if (generation == hydrationGeneration) {
+                        _state.value = RepoState.Stale(state.value.snapshot, reason = e.message)
+                    }
                 }
             }
             throw e
@@ -1696,6 +1749,8 @@ class SessionRepositoryImpl(
         const val PROJECT_EVENT_REFRESH_DEBOUNCE_MS = 150L
         const val MAX_CONCURRENT = 10
         const val SEARCH_LIMIT = 100
+        const val SESSION_INITIAL_LIMIT = 50
+        const val SESSION_PAGE_INCREMENT = 50
         const val SESSION_HISTORY_LIMIT = Int.MAX_VALUE
         const val TAG = "SessionRepository"
         const val RESOLVED_QUESTION_TTL_MS = 30_000L

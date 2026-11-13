@@ -248,6 +248,7 @@
     <string name="sessions_search_status_current">Current</string>
     <string name="sessions_search_status_failed">Failed</string>
     <string name="sessions_loading">Loading sessions</string>
+    <string name="sessions_load_more">Load more sessions</string>
     <string name="sessions_new">New Session</string>
     <string name="sessions_delete">Delete</string>
     <string name="sessions_rename">Rename</string>

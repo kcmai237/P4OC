@@ -34,7 +34,7 @@ import java.net.URI
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
-class OpenCodeEventSource(
+class OpenCodeEventSource internal constructor(
     private val okHttpClient: OkHttpClient,
     private val json: Json,
     private val baseUrl: String,

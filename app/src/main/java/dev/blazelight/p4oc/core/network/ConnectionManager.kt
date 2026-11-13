@@ -194,6 +194,7 @@ class ConnectionManager constructor(
             baseUrl = config.url,
             eventMapper = eventMapper,
             useV2 = isV2,
+            backoffEnabled = BuildConfig.NET_O3_SSE_BACKOFF,
         )
         _authOkHttpClient.value = buildWebSocketOkHttpClient(baseClient)
 

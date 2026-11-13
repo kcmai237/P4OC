@@ -47,6 +47,10 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             signingConfig = signingConfigs.getByName("release")
+            buildConfigField("boolean", "NET_O2_INCREMENTAL_MESSAGES", "false")
+            buildConfigField("boolean", "NET_O3_SSE_BACKOFF", "false")
+            buildConfigField("boolean", "NET_O4_SHELL_POLLING", "false")
+            buildConfigField("boolean", "NET_O5_COIL_BOUNDED", "false")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -56,6 +60,10 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             signingConfig = signingConfigs.getByName("debug")
+            buildConfigField("boolean", "NET_O2_INCREMENTAL_MESSAGES", "true")
+            buildConfigField("boolean", "NET_O3_SSE_BACKOFF", "true")
+            buildConfigField("boolean", "NET_O4_SHELL_POLLING", "true")
+            buildConfigField("boolean", "NET_O5_COIL_BOUNDED", "true")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -66,6 +74,10 @@ android {
             isMinifyEnabled = false
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
+            buildConfigField("boolean", "NET_O2_INCREMENTAL_MESSAGES", "true")
+            buildConfigField("boolean", "NET_O3_SSE_BACKOFF", "true")
+            buildConfigField("boolean", "NET_O4_SHELL_POLLING", "true")
+            buildConfigField("boolean", "NET_O5_COIL_BOUNDED", "true")
         }
     }
 

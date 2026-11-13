@@ -35,6 +35,12 @@ jobs:
       - name: Run unit tests
         run: ./gradlew :app:testDebugUnitTest
 
+      - name: Verify net flags (release)
+        run: ./gradlew :app:testReleaseUnitTest --tests 'dev.blazelight.p4oc.NetFlagsTest'
+
+      - name: Verify net flags (githubRelease)
+        run: ./gradlew :app:testGithubReleaseUnitTest --tests 'dev.blazelight.p4oc.NetFlagsTest'
+
       - name: Build debug APK
         run: ./gradlew :app:assembleDebug
 

@@ -2,6 +2,7 @@ package dev.blazelight.p4oc.data.session
 
 import dev.blazelight.p4oc.core.lifecycle.ForegroundState
 import dev.blazelight.p4oc.core.log.AppLog
+import dev.blazelight.p4oc.core.network.DataSaverPolicy
 import dev.blazelight.p4oc.core.network.HTTP_NOT_FOUND
 import dev.blazelight.p4oc.data.files.ofish.OfishSessionNames
 import dev.blazelight.p4oc.data.remote.dto.CreateSessionRequest
@@ -72,6 +73,8 @@ class SessionRepositoryImpl(
     private val foregroundState: ForegroundState = ForegroundState.AlwaysForeground,
     /** O2 incremental v1 history: load only the missing older page via the `before` cursor. */
     private val incrementalMessages: Boolean = false,
+    /** O11 opt-in data saver: defer non-essential REST refreshes on metered networks. */
+    private val dataSaverPolicy: DataSaverPolicy = DataSaverPolicy.Disabled,
 ) : SessionRepository {
     data class CachedSnapshot(
         val snapshot: Snapshot,
@@ -97,6 +100,9 @@ class SessionRepositoryImpl(
     private var isForeground: Boolean = true
 
     @Volatile
+    private var dataSaverActive: Boolean = false
+
+    @Volatile
     private var deferredForegroundRefresh: Boolean = false
 
     init {
@@ -105,26 +111,37 @@ class SessionRepositoryImpl(
                 val wasForeground = isForeground
                 isForeground = foreground
                 if (foreground && !wasForeground) {
-                    runForegroundCatchUp()
+                    runDeferredRefresh()
+                }
+            }
+        }
+        scope.launch {
+            dataSaverPolicy.active.collect { active ->
+                val wasActive = dataSaverActive
+                dataSaverActive = active
+                if (!active && wasActive) {
+                    runDeferredRefresh()
                 }
             }
         }
     }
 
-    private fun runForegroundCatchUp() {
+    private fun runDeferredRefresh() {
+        // Keep the pending flag while a pause reason (background or data saver) still applies.
+        if (!isForeground || dataSaverActive) return
         if (!deferredForegroundRefresh) return
         deferredForegroundRefresh = false
         scope.launch {
             runCatching { refresh() }
                 .onFailure { error ->
                     if (error is CancellationException) throw error
-                    AppLog.w(TAG, "Foreground catch-up refresh failed: ${error.javaClass.simpleName}")
+                    AppLog.w(TAG, "Deferred catch-up refresh failed: ${error.javaClass.simpleName}")
                 }
         }
     }
 
-    private fun deferWhileBackground(): Boolean {
-        if (isForeground) return false
+    private fun deferNonEssentialRefresh(): Boolean {
+        if (isForeground && !dataSaverActive) return false
         deferredForegroundRefresh = true
         return true
     }
@@ -319,7 +336,7 @@ class SessionRepositoryImpl(
         if (event is OpenCodeEvent.ProjectUpdated || event is OpenCodeEvent.ProjectDirectoriesUpdated ||
             event is OpenCodeEvent.ProjectRefreshRequested
         ) {
-            if (deferWhileBackground()) return
+            if (deferNonEssentialRefresh()) return
             projectRefreshJob?.cancel()
             projectRefreshJob = scope.launch {
                 delay(PROJECT_EVENT_REFRESH_DEBOUNCE_MS)
@@ -332,7 +349,7 @@ class SessionRepositoryImpl(
             return
         }
         if (event is OpenCodeEvent.SessionRefreshRequested && !event.removed) {
-            if (!deferWhileBackground()) requestSessionRefresh(event.sessionID)
+            if (!deferNonEssentialRefresh()) requestSessionRefresh(event.sessionID)
             return
         }
         if (event is OpenCodeEvent.MessageRefreshRequested) {

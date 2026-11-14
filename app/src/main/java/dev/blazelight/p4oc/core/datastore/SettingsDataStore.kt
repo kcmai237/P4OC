@@ -225,6 +225,13 @@ class SettingsDataStore constructor(
         private val KEY_AUTO_RECONNECT = booleanPreferencesKey("auto_reconnect")
         private val KEY_RECONNECT_TIMEOUT_SECONDS = intPreferencesKey("reconnect_timeout_seconds")
 
+        // O11 opt-in data saver (OFF by default)
+        private val KEY_DATA_SAVER_ENABLED = booleanPreferencesKey("data_saver_enabled")
+
+        /** Pure preference mapping, kept testable without an Android DataStore instance. */
+        internal fun readDataSaverEnabled(prefs: Preferences): Boolean =
+            prefs[KEY_DATA_SAVER_ENABLED] ?: false
+
         const val DEFAULT_LOCAL_URL = "http://localhost:4096"
         const val THEME_SYSTEM = "system"
         const val THEME_LIGHT = "light"
@@ -773,6 +780,16 @@ class SettingsDataStore constructor(
             prefs[KEY_AUTO_RECONNECT] = settings.autoReconnect
             prefs[KEY_RECONNECT_TIMEOUT_SECONDS] = settings.reconnectTimeoutSeconds
         }
+    }
+
+    // ── O11 data saver (opt-in, OFF by default) ──
+
+    val dataSaverEnabled: Flow<Boolean> = context.dataStore.data
+        .map { prefs -> readDataSaverEnabled(prefs) }
+        .distinctUntilChanged()
+
+    suspend fun setDataSaverEnabled(enabled: Boolean) {
+        context.dataStore.edit { prefs -> prefs[KEY_DATA_SAVER_ENABLED] = enabled }
     }
 
     val favoriteModels: Flow<Set<ModelInput>> = context.dataStore.data.map { prefs ->

@@ -6,8 +6,12 @@ import dev.blazelight.p4oc.core.datastore.SettingsDataStore
 import dev.blazelight.p4oc.core.haptic.HapticFeedback
 import dev.blazelight.p4oc.core.lifecycle.ForegroundState
 import dev.blazelight.p4oc.core.lifecycle.MutableForegroundState
+import dev.blazelight.p4oc.core.network.AndroidNetworkMeteredSource
 import dev.blazelight.p4oc.core.network.ConnectionManager
+import dev.blazelight.p4oc.core.network.DataSaverPolicy
 import dev.blazelight.p4oc.core.network.MdnsDiscoveryManager
+import dev.blazelight.p4oc.core.network.MutableDataSaverPolicy
+import dev.blazelight.p4oc.core.network.NetworkMeteredSource
 import dev.blazelight.p4oc.core.network.PtyWebSocketClient
 import dev.blazelight.p4oc.core.network.ServerConnectionRegistry
 import dev.blazelight.p4oc.core.notification.NotificationEventObserver
@@ -43,6 +47,9 @@ import dev.blazelight.p4oc.ui.screens.terminal.TerminalViewModel
 import dev.blazelight.p4oc.ui.tabs.TabManager
 import dev.blazelight.p4oc.ui.workspace.WorkspaceRepositoryOwner
 import dev.blazelight.p4oc.ui.workspace.WorkspaceViewModel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.serialization.json.Json
 import org.koin.android.ext.koin.androidContext
 import org.koin.core.module.dsl.viewModel
@@ -102,6 +109,14 @@ val networkModule = module {
     }
     single<UserWorkspaceRootsSource> { SettingsUserWorkspaceRootsSource(get()) }
     single<ForegroundState> { MutableForegroundState() }
+    single<NetworkMeteredSource> { AndroidNetworkMeteredSource(androidContext()) }
+    single<DataSaverPolicy> {
+        MutableDataSaverPolicy(
+            enabled = get<SettingsDataStore>().dataSaverEnabled,
+            metered = get<NetworkMeteredSource>().metered,
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+        )
+    }
     single {
         SessionRepositoryProvider(
             get(),
@@ -111,6 +126,7 @@ val networkModule = module {
             json = get(),
             foregroundState = get(),
             incrementalMessages = BuildConfig.NET_O2_INCREMENTAL_MESSAGES,
+            dataSaverPolicy = get(),
         )
     }
 }

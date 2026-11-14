@@ -985,6 +985,8 @@
     <string name="connection_section_general">General</string>
     <string name="settings_auto_reconnect">Auto-reconnect</string>
     <string name="settings_auto_reconnect_desc">Automatically reconnect when connection drops</string>
+    <string name="settings_data_saver">Data saver</string>
+    <string name="settings_data_saver_desc">On metered networks: delays non-essential automatic project and session refreshes. Live chat, messages, terminal, and file transfers are never affected.</string>
     <string name="settings_reconnect_timeout">Reconnect timeout</string>
 
     <!-- Notification permissions -->

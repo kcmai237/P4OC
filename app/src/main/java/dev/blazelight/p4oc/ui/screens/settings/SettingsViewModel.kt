@@ -31,6 +31,11 @@ class SettingsViewModel constructor(
         settingsDataStore.connectionSettings
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), ConnectionSettings())
 
+    /** O11 opt-in data saver, OFF by default. */
+    val dataSaverEnabled: StateFlow<Boolean> =
+        settingsDataStore.dataSaverEnabled
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
     /**
      * Display name of the server these settings are scoped to, or `null` when Settings was opened
      * outside any workspace tab. Provider/agent/skill configuration lives on one specific server,
@@ -77,6 +82,12 @@ class SettingsViewModel constructor(
             settingsDataStore.updateConnectionSettings(
                 current.copy(reconnectTimeoutSeconds = seconds.coerceIn(15, 120))
             )
+        }
+    }
+
+    fun toggleDataSaver() {
+        viewModelScope.launch {
+            settingsDataStore.setDataSaverEnabled(!dataSaverEnabled.value)
         }
     }
 

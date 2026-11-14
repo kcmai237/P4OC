@@ -19,7 +19,8 @@
 ## Mesuré vs estimé
 
 - **Mesuré** : taille APK `githubRelease` — baseline T001.4 = 5 563 332 o ;
-  dernière mesure T001.16 = 5 581 108 o (**+17 776 o**, plafond +150 000).
+  canary **`v0.17.0-canary.1` = 5 581 112 o** (**+17 780 o**, plafond
+  +150 000, marge 132 220). Pré-release publiée sur le fork uniquement.
 - **Estimé** : tous les gains réseau (pas d'appareil/HAR). Aucun gain n'est
   présenté comme acquis.
 

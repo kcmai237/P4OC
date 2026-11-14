@@ -46,9 +46,11 @@ Plafond : baseline + 150 000 = **5 713 332 octets**.
 | T001.15 | O12 | 5 580 140 | 0 | +16 808 |
 | T001.16 | O11 | 5 581 108 | +968 | **+17 776** |
 | T001.17 | O6/O7 | (docs only) | 0 | +17 776 |
+| T001.18 | final docs | (docs only) | 0 | +17 776 |
+| T001.19 | release 0.17.0 | 5 581 112 | +4 | **+17 780** |
 
-**Cumul = +17 776 octets** sur +150 000 autorisés ; marge restante
-**132 224 octets** (2,3 % du budget consommé). Aucun dépassement, aucune
+**Cumul = +17 780 octets** sur +150 000 autorisés ; marge restante
+**132 220 octets** (2,3 % du budget consommé). Aucun dépassement, aucune
 réserve nécessaire.
 
 ## 3. Vetos — preuve par chantier
@@ -113,6 +115,6 @@ Le résiduel ne peut donc pas être présenté comme acquis.
 ## 7. Renvois
 
 - Détails par chantier : `findings/T001.4.md` … `findings/T001.17.md`.
-- Mesures APK : `collect/T001.4/` … `collect/T001.16/`.
+- Mesures APK : `collect/T001.4/` … `collect/T001.19/`.
 - Demandes serveur : `docs/perf/SERVER_REQUESTS.md`.
 - Procédure de release et flags : `docs/perf/NOTES_RELEASE.md`.

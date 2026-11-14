@@ -2,12 +2,13 @@
 
 ## 1. État de version
 
-- Base : `upstream/main` = `636a76a4`, version **0.16.0**, versionCode **22**.
-- Les branches d'optimisation (`perf/*`) **ne modifient pas** `versionName` /
-  `versionCode`. Le bump est réservé à la release finale (**T001.19**), qui
-  décidera du numéro (proposition : `0.17.0`, versionCode 23).
-- `origin/main` (fork) reste à `33021cb` (v0.13.0) ; **aucune release de
-  production** n'a été publiée pendant les optimisations.
+- Base : `upstream/main` = `636a76a4`, version 0.16.0, versionCode 22.
+- **Release finale** : **0.17.0 / versionCode 23** (bump unique T001.19).
+- Canary publié : tag **`v0.17.0-canary.1`** sur le fork uniquement,
+  pré-release GitHub (`isPrerelease = true`), APK `app-githubRelease.apk`
+  = 5 581 112 octets.
+- `origin/main` (fork) reste à `33021cb` (v0.13.0) : la livraison passe par la
+  PR finale, jamais par un push direct sur `main`.
 
 ## 2. Procédure de release effectivement suivie
 

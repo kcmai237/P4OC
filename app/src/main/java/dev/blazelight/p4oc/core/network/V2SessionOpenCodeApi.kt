@@ -1,6 +1,4 @@
 package dev.blazelight.p4oc.core.network
-
-import dev.blazelight.p4oc.BuildConfig
 import dev.blazelight.p4oc.data.remote.dto.CreateSessionRequest
 import dev.blazelight.p4oc.data.remote.dto.ExecuteCommandRequest
 import dev.blazelight.p4oc.data.remote.dto.ForkSessionRequest
@@ -39,7 +37,7 @@ internal class V2SessionOpenCodeApi(
     private val commandSupport = V2SessionCommandSupport(
         http = http,
         fields = mapper,
-        adaptivePolling = BuildConfig.NET_O4_SHELL_POLLING,
+        adaptivePolling = true,
     )
 
     override suspend fun listSessions(

@@ -27,10 +27,5 @@ class PocketCodeApp : Application(), ImageLoaderFactory {
         notificationEventObserver.start()
     }
 
-    override fun newImageLoader(): ImageLoader =
-        if (BuildConfig.NET_O5_COIL_BOUNDED) {
-            boundedImageLoader(this)
-        } else {
-            ImageLoader(this)
-        }
+    override fun newImageLoader(): ImageLoader = boundedImageLoader(this)
 }

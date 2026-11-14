@@ -36,22 +36,23 @@
 - Release finale : tag `vX.Y.Z` sur `main` **après** fusion des branches
   validées ; `release` reste la variante flags OFF.
 
-## 4. État des flags (`BuildConfig`)
+## 4. État des flags (release finale)
 
-| Flag | debug | githubRelease (canary) | release |
-|---|---|---|---|
-| `NET_O2_INCREMENTAL_MESSAGES` | ON | ON | **OFF** |
-| `NET_O3_SSE_BACKOFF` | ON | ON | **OFF** |
-| `NET_O4_SHELL_POLLING` | ON | ON | **OFF** |
-| `NET_O5_COIL_BOUNDED` | ON | ON | **OFF** |
+Les quatre flags `BuildConfig` de canary (`NET_O2_INCREMENTAL_MESSAGES`,
+`NET_O3_SSE_BACKOFF`, `NET_O4_SHELL_POLLING`, `NET_O5_COIL_BOUNDED`) ont été
+**retirés en T001.19** : les optimisations validées sont actives dans **toutes**
+les variantes. Les coutures internes (`backoffEnabled`, `adaptivePolling`,
+`incrementalMessages`) restent paramétrables pour les tests du chemin OFF,
+mais le câblage de production est toujours ON.
 
-Vérifié à chaque run par la tâche CI `Verify net flags` sur les trois
-variantes (`android.onlyEnableUnitTestForTheTestedBuildType=false` requis).
+Ordre de retrait justifié (risque croissant) : O5 (mémoire seule) → O3
+(reconnexions seulement) → O4 (shell v2 seulement) → O2 (historique, impact le
+plus large). Les étapes CI `Verify net flags` ont été supprimées du job
+`build` ; le job `release` garde son mécanisme inchangé.
 
-Non flaggés (toujours actifs, sans effet de bord critique) : O8 (pagination
-sessions), O9 (coalescence catalogues), O10 (pause arrière-plan), O12
-(contre-pression PTY). O11 (data saver) est un réglage **runtime opt-in**, OFF
-par défaut, sans BuildConfig.
+Non flaggés (toujours actifs) : O8 (pagination sessions), O9 (coalescence
+catalogues), O10 (pause arrière-plan), O12 (contre-pression PTY). O11 (data
+saver) reste un réglage **runtime opt-in**, OFF par défaut.
 
 ## 5. Prérequis
 

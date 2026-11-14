@@ -1,7 +1,6 @@
 package dev.blazelight.p4oc.di
 
 import androidx.lifecycle.SavedStateHandle
-import dev.blazelight.p4oc.BuildConfig
 import dev.blazelight.p4oc.core.datastore.SettingsDataStore
 import dev.blazelight.p4oc.core.haptic.HapticFeedback
 import dev.blazelight.p4oc.core.lifecycle.ForegroundState
@@ -125,7 +124,7 @@ val networkModule = module {
             userWorkspaceRoots = get(),
             json = get(),
             foregroundState = get(),
-            incrementalMessages = BuildConfig.NET_O2_INCREMENTAL_MESSAGES,
+            incrementalMessages = true,
             dataSaverPolicy = get(),
         )
     }

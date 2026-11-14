@@ -36,8 +36,8 @@ android {
         applicationId = "dev.blazelight.p4oc"
         minSdk = 26
         targetSdk = 36
-        versionCode = 22
-        versionName = "0.16.0"
+        versionCode = 23
+        versionName = "0.17.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -47,10 +47,6 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             signingConfig = signingConfigs.getByName("release")
-            buildConfigField("boolean", "NET_O2_INCREMENTAL_MESSAGES", "false")
-            buildConfigField("boolean", "NET_O3_SSE_BACKOFF", "false")
-            buildConfigField("boolean", "NET_O4_SHELL_POLLING", "false")
-            buildConfigField("boolean", "NET_O5_COIL_BOUNDED", "false")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -60,10 +56,6 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             signingConfig = signingConfigs.getByName("debug")
-            buildConfigField("boolean", "NET_O2_INCREMENTAL_MESSAGES", "true")
-            buildConfigField("boolean", "NET_O3_SSE_BACKOFF", "true")
-            buildConfigField("boolean", "NET_O4_SHELL_POLLING", "true")
-            buildConfigField("boolean", "NET_O5_COIL_BOUNDED", "true")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -74,10 +66,6 @@ android {
             isMinifyEnabled = false
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
-            buildConfigField("boolean", "NET_O2_INCREMENTAL_MESSAGES", "true")
-            buildConfigField("boolean", "NET_O3_SSE_BACKOFF", "true")
-            buildConfigField("boolean", "NET_O4_SHELL_POLLING", "true")
-            buildConfigField("boolean", "NET_O5_COIL_BOUNDED", "true")
         }
     }
 

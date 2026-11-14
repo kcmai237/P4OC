@@ -70,6 +70,8 @@ class SessionRepositoryImpl(
     private val userWorkspaceRoots: suspend () -> List<String> = { emptyList() },
     /** O10 partial pause: non-essential REST refreshes are deferred while backgrounded. */
     private val foregroundState: ForegroundState = ForegroundState.AlwaysForeground,
+    /** O2 incremental v1 history: load only the missing older page via the `before` cursor. */
+    private val incrementalMessages: Boolean = false,
 ) : SessionRepository {
     data class CachedSnapshot(
         val snapshot: Snapshot,
@@ -1054,7 +1056,30 @@ class SessionRepositoryImpl(
         val workspaceClient = client as? WorkspaceClient
             ?: error("Message loading requires WorkspaceClient")
         val mapper = messageMapper ?: error("Message loading requires MessageMapper")
-        val messages = workspaceClient.getMessages(sessionId.value, limit).map { dto -> mapper.mapWrapperToDomain(dto) }
+        val current = synchronized(messageStateLock) { messageState(sessionId.value).value }
+        val oldest = current.minByOrNull { it.message.createdAt }?.message
+        val useIncremental = incrementalMessages && !client.streamsEphemeralContent && oldest != null
+        val messages: List<MessageWithParts>
+        var returnedCount: Int
+        if (useIncremental) {
+            val pageSize = (limit - current.size).coerceAtLeast(1)
+            val page = workspaceClient.getMessages(sessionId.value, pageSize, before = oldest.id)
+                .map { dto -> mapper.mapWrapperToDomain(dto) }
+            val knownIds = current.mapTo(mutableSetOf()) { it.message.id }
+            val looksOlder = page.none { it.message.id in knownIds } &&
+                page.all { it.message.createdAt <= oldest.createdAt }
+            if (looksOlder) {
+                messages = page
+                returnedCount = current.size + page.size
+            } else {
+                // The server did not honour the cursor: fall back to the current full-window path.
+                messages = workspaceClient.getMessages(sessionId.value, limit).map { dto -> mapper.mapWrapperToDomain(dto) }
+                returnedCount = messages.size
+            }
+        } else {
+            messages = workspaceClient.getMessages(sessionId.value, limit).map { dto -> mapper.mapWrapperToDomain(dto) }
+            returnedCount = messages.size
+        }
         synchronized(messageStateLock) {
             mergeLoadedMessages(sessionId.value, messages)
             // Record the requested bound, not the count returned: the server may supply fewer
@@ -1074,7 +1099,7 @@ class SessionRepositoryImpl(
             reconcilePendingQuestions(sessionId.value)
         }
         reconcilePendingPermissions(sessionId.value)
-        return messages.size
+        return returnedCount
     }
 
     override fun sendMessageAsync(sessionId: SessionId, request: SendMessageRequest): Deferred<Result<Unit>> = scope.async {

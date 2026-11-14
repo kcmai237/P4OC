@@ -32,6 +32,7 @@ class SessionRepositoryProvider(
     private val repositoryDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val json: Json = Json.Default,
     private val foregroundState: ForegroundState = ForegroundState.AlwaysForeground,
+    private val incrementalMessages: Boolean = false,
 ) {
     data class Lease(
         val workspaceClient: WorkspaceClient,
@@ -75,6 +76,7 @@ class SessionRepositoryProvider(
                 dispatcher = repositoryDispatcher,
                 userWorkspaceRoots = { userWorkspaceRoots.roots(workspace.server) },
                 foregroundState = foregroundState,
+                incrementalMessages = incrementalMessages,
             )
             Entry(
                 workspaceClient = workspaceClient,

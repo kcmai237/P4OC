@@ -251,8 +251,12 @@ class WorkspaceClient(
     suspend fun getSessionDiff(id: String, messageId: String? = null): List<SnapshotFileDiffDto> =
         api.getSessionDiff(id, messageId, directory, workspace = null)
 
-    suspend fun getMessages(sessionId: String, limit: Int? = null): List<MessageWrapperDto> =
-        api.getMessages(sessionId, limit, before = null, directory = directory, workspace = null)
+    suspend fun getMessages(
+        sessionId: String,
+        limit: Int? = null,
+        before: String? = null,
+    ): List<MessageWrapperDto> =
+        api.getMessages(sessionId, limit, before = before, directory = directory, workspace = null)
 
     override suspend fun sendMessageAsync(sessionId: String, request: SendMessageRequest) {
         api.sendMessageAsync(sessionId, request, directory, workspace = null)

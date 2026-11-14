@@ -3,6 +3,8 @@ package dev.blazelight.p4oc.core.network
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -19,12 +21,12 @@ class PtyTerminalClientTest {
     fun `bounded handoff never drops and preserves order under saturation`() = runTest {
         val buffer = PtyOutputBuffer(capacity = 16)
         val received = mutableListOf<String>()
-        backgroundScope.launch(start = CoroutineStart.UNDISPATCHED) {
-            buffer.frames.collect { received += it }
+        val consumer = launch(start = CoroutineStart.UNDISPATCHED) {
+            buffer.frames.take(5_000).toList(received)
         }
 
         repeat(5_000) { buffer.emit("frame-$it") }
-        advanceUntilIdle()
+        consumer.join()
 
         assertEquals(5_000, received.size)
         assertEquals((0 until 5_000).map { "frame-$it" }, received)
@@ -46,10 +48,12 @@ class PtyTerminalClientTest {
         assertTrue(producer.isActive)
 
         val received = mutableListOf<String>()
-        backgroundScope.launch(start = CoroutineStart.UNDISPATCHED) {
-            buffer.frames.collect { received += it }
+        val consumer = launch(start = CoroutineStart.UNDISPATCHED) {
+            buffer.frames.take(10).toList(received)
         }
         advanceUntilIdle()
+        producer.join()
+        consumer.join()
 
         assertEquals(10, emitted)
         assertEquals((0 until 10).map { "frame-$it" }, received)
@@ -72,13 +76,12 @@ class PtyTerminalClientTest {
     fun `a frame is delivered before the producer fills the buffer`() = runTest {
         val buffer = PtyOutputBuffer(capacity = 2)
         val first = CompletableDeferred<String>()
-        backgroundScope.launch(start = CoroutineStart.UNDISPATCHED) {
-            buffer.frames.collect {
-                if (!first.isCompleted) first.complete(it)
-            }
+        val consumer = launch(start = CoroutineStart.UNDISPATCHED) {
+            first.complete(buffer.frames.first())
         }
 
         buffer.emit("hello")
+        consumer.join()
 
         assertEquals("hello", first.await())
     }

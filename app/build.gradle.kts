@@ -103,15 +103,6 @@ android {
     }
 }
 
-tasks.withType<Test>().configureEach {
-    testLogging {
-        events("failed")
-        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
-        showExceptions = true
-        showStackTraces = true
-    }
-}
-
 dependencies {
     // Core Android
     implementation(libs.androidx.core.ktx)

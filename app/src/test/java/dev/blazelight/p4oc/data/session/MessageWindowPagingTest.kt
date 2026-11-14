@@ -34,7 +34,7 @@ class MessageWindowPagingTest {
     private val mapper = MessageMapper()
 
     // Ascending server history m1..m350; the newest page is the tail.
-    private val history = (1L..350L).map { assistantWrapper("m$it", createdAt = it) }
+    private val history = (1L..350L).mapTo(mutableListOf()) { assistantWrapper("m$it", createdAt = it) }
 
     @Test
     fun `incremental paging walks the full history without duplicates`() = runTest {
@@ -128,11 +128,12 @@ class MessageWindowPagingTest {
         repo.loadMessages(sessionId, 400)
         advanceUntilIdle()
 
-        // A live prompt response lands via SSE after the bounded history was loaded.
+        // A live prompt response lands via SSE and is persisted server-side.
+        history += assistantWrapper("m351", createdAt = 351L)
         repo.acceptEvent(OpenCodeEvent.MessageUpdated(assistantMessage("m351", createdAt = 351L)))
         advanceUntilIdle()
 
-        // Reconnect recovery re-fetches the remembered full window non-destructively.
+        // Reconnect recovery re-fetches the remembered full window authoritatively.
         repo.acceptEvent(OpenCodeEvent.Connected)
         advanceUntilIdle()
 

@@ -12,8 +12,12 @@ import dev.blazelight.p4oc.core.mime.FilenameMimeType
 import dev.blazelight.p4oc.core.network.ApiResult
 import dev.blazelight.p4oc.core.network.ConnectionState
 import dev.blazelight.p4oc.core.network.ServerConnectionRegistry
+import dev.blazelight.p4oc.core.network.V2FormInfo
 import dev.blazelight.p4oc.core.network.safeApiCall
+import dev.blazelight.p4oc.data.media.ChatMediaLoader
+import dev.blazelight.p4oc.data.media.WorkspaceChatMediaLoader
 import dev.blazelight.p4oc.data.remote.dto.ExecuteCommandRequest
+import dev.blazelight.p4oc.data.remote.dto.InitSessionRequest
 import dev.blazelight.p4oc.data.remote.dto.PartInputDto
 import dev.blazelight.p4oc.data.remote.dto.PermissionResponseRequest
 import dev.blazelight.p4oc.data.remote.dto.QuestionReplyRequest
@@ -27,17 +31,24 @@ import dev.blazelight.p4oc.data.session.SessionUiState
 import dev.blazelight.p4oc.data.session.presence
 import dev.blazelight.p4oc.data.workspace.WorkspaceClient
 import dev.blazelight.p4oc.domain.model.*
+import dev.blazelight.p4oc.domain.server.affectsCatalogIn
 import dev.blazelight.p4oc.domain.session.SessionId
 import dev.blazelight.p4oc.ui.components.chat.SelectedFile
+import dev.blazelight.p4oc.ui.components.chat.toOpenCodeFileUrl
 import dev.blazelight.p4oc.ui.navigation.Screen
 import dev.blazelight.p4oc.ui.screens.files.upload.UploadCoordinator
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
-import java.io.File
-import java.net.URI
+import kotlinx.serialization.json.JsonObject
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Slim coordinator — delegates to sub-managers for message state,
@@ -73,6 +84,7 @@ class ChatViewModel constructor(
         serverConnectionRegistry,
     )
     val filePickerManager = FilePickerManager(workspaceClient, viewModelScope, uploadCoordinator, settingsDataStore)
+    val mediaLoader: ChatMediaLoader = WorkspaceChatMediaLoader(workspaceClient, serverConnectionRegistry)
 
     // --- Core state ---
     private val _uiState = MutableStateFlow(ChatUiState(inputText = restoredInputText()))
@@ -80,12 +92,18 @@ class ChatViewModel constructor(
     private val _sessionMissing = MutableSharedFlow<Unit>(replay = 1)
     val sessionMissing: SharedFlow<Unit> = _sessionMissing.asSharedFlow()
 
+    private val _pendingV2Forms = MutableStateFlow(PendingV2FormsUiState())
+    val pendingV2Forms: StateFlow<PendingV2FormsUiState> = _pendingV2Forms.asStateFlow()
+    private var pendingV2FormsRefreshJob: Job? = null
+    private var pendingV2FormsRefreshRequested = false
+
     /** Convenience alias — ChatScreen reads this directly. */
     val messages: StateFlow<List<MessageWithParts>> = sessionRepository.messages(SessionId(sessionId))
     private val repositorySessionState: StateFlow<dev.blazelight.p4oc.data.session.SessionUiState> =
         sessionRepository.sessionUiState(SessionId(sessionId))
 
     val connectionState: StateFlow<ConnectionState> = workspaceClient.connectionState
+    val supportsSessionTodos: Boolean get() = workspaceClient.supportsSessionTodos
 
     private val _branchName = MutableStateFlow<String?>(null)
     val branchName: StateFlow<String?> = _branchName.asStateFlow()
@@ -95,8 +113,43 @@ class ChatViewModel constructor(
     val hasUnreadResponse: StateFlow<Boolean> = _hasUnreadResponse.asStateFlow()
     private val _isActiveTab = MutableStateFlow(false)
 
+    // Repository emissions may be collected immediately from init, so every field read by
+    // applyRepositorySessionState must be initialized before any collector can launch.
+    private var lastResponseCompletedToken = 0L
+    private var hasResponseTokenBaseline = false
+    private var responseReconciliationJob: Job? = null
+    private var initOperationGeneration = 0L
+    private var currentInitOperationGeneration: Long? = null
+    private var currentInitCommandDispatchOwner: Long? = null
+    private var initRequestJob: Job? = null
+    private var initTerminalTokenBaseline: Long? = null
+    private val commandDispatchGeneration = AtomicLong(NO_COMMAND_DISPATCH_OWNER)
+    private val commandDispatchOwner = AtomicLong(NO_COMMAND_DISPATCH_OWNER)
+    private var composerSubmissionGeneration = 0L
+    private var pendingComposerSubmission: PendingComposerSubmission? = null
+
+    private data class ComposerSubmission(
+        val generation: Long,
+        val draft: String,
+    )
+
+    private data class PendingComposerSubmission(
+        val submission: ComposerSubmission,
+        val clearAcknowledged: Boolean = false,
+        val failed: Boolean = false,
+    )
+
+    // True from the moment a send clears the previous run's UI error until the run is confirmed
+    // active (Busy/Retry) or reaches a genuine terminal boundary. While set, repository emissions
+    // that still carry the previous run's error (todos, permissions, session updates arriving
+    // before the synthetic Busy clears it) must not flicker that stale error back into the UI.
+    private var suppressStaleRunErrors = false
+
     init {
-        serverConnectionRegistry?.let(::observeCommandCatalogEvents)
+        serverConnectionRegistry?.let { registry ->
+            observeCommandCatalogEvents(registry)
+            observeV2FormEvents(registry)
+        }
     }
 
     @OptIn(FlowPreview::class)
@@ -108,12 +161,25 @@ class ChatViewModel constructor(
                     val refreshesCommands = event is OpenCodeEvent.ModelsRefreshed ||
                         event is OpenCodeEvent.CatalogUpdated ||
                         event is OpenCodeEvent.McpToolsChanged
-                    scopedEvent.generation == workspaceClient.generation &&
-                        scopedEvent.workspaceKey == workspaceClient.workspace.key &&
+                    scopedEvent.affectsCatalogIn(workspaceClient.workspace, workspaceClient.generation) &&
                         refreshesCommands
                 }
                 .debounce(COMMAND_CATALOG_REFRESH_DEBOUNCE_MS)
                 .collect { refreshCommandsInBackground() }
+        }
+    }
+
+    @OptIn(FlowPreview::class)
+    private fun observeV2FormEvents(registry: ServerConnectionRegistry) {
+        viewModelScope.launch {
+            registry.events(workspaceClient.workspace.server)
+                .filter { scopedEvent ->
+                    scopedEvent.generation == workspaceClient.generation &&
+                        scopedEvent.workspaceKey == workspaceClient.workspace.key &&
+                        (scopedEvent.event as? OpenCodeEvent.FormRefreshRequested)?.sessionID == sessionId
+                }
+                .debounce(COMMAND_CATALOG_REFRESH_DEBOUNCE_MS)
+                .collect { refreshPendingForms() }
         }
     }
 
@@ -126,12 +192,13 @@ class ChatViewModel constructor(
         dialogManager.pendingQuestion,
         dialogManager.pendingPermissionsByCallId,
         _hasUnreadResponse,
-        messages
+        messages,
     ) { repositoryState: SessionUiState,
         pendingQuestion: QuestionRequest?,
         pendingPermissionsByCallId: Map<String, Permission>,
         hasUnread: Boolean,
-        msgs: List<MessageWithParts> ->
+        msgs: List<MessageWithParts>,
+        ->
         val hasRunningTools = msgs.any { msg ->
             msg.parts.any { part -> part is Part.Tool && part.state is ToolState.Running }
         }
@@ -147,6 +214,12 @@ class ChatViewModel constructor(
             hasStreamingText = hasStreamingText,
             hasRunningTools = hasRunningTools,
         )
+    }.combine(_pendingV2Forms) { presence, forms ->
+        if (forms.forms.isNotEmpty() && presence != SessionPresence.ERROR && presence != SessionPresence.RETRYING) {
+            SessionPresence.AWAITING_INPUT
+        } else {
+            presence
+        }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SessionPresence.IDLE)
 
     val visualSettings = settingsDataStore.visualSettings
@@ -171,19 +244,29 @@ class ChatViewModel constructor(
         const val TAG = "ChatViewModel"
         private const val INITIAL_HISTORY_LIMIT = 100
         private const val HISTORY_PAGE_SIZE = 100
+        private const val HTTP_TOO_MANY_REQUESTS = 429
+        private const val HTTP_NOT_FOUND = 404
+        private const val HTTP_CONFLICT = 409
         private const val KEY_DRAFT_TEXT = "chat_draft_text"
         private const val KEY_ATTACHED_FILES = "chat_attached_files"
         private const val COMMAND_CATALOG_REFRESH_DEBOUNCE_MS = 150L
+        private val RESPONSE_RECONCILIATION_DELAYS_MS = listOf(2_000L, 5_000L, 10_000L, 20_000L)
+        private const val RUN_STALLED_NOTICE = "No completion update was received. " +
+            "The run may still be active; stop it before retrying."
 
         // SavedState shares Android's Binder transaction budget with the rest of the Activity.
         private const val MAX_PERSISTED_DRAFT_CHARS = 64 * 1024
         private const val MAX_PERSISTED_ATTACHMENTS_JSON_CHARS = 64 * 1024
         private const val UNAVAILABLE_ATTACHMENTS_ERROR =
             "Remove unavailable attachments before sending."
+        private const val COMMAND_REFUSED_WHILE_RUNNING_ERROR =
+            "Wait for the current run to finish or stop it first."
+        private const val NO_COMMAND_DISPATCH_OWNER = 0L
 
         /**
-         * Built-in OpenCode commands that aren't returned by the /command API endpoint.
-         * Localized descriptions are resolved at Compose display boundaries.
+         * Local command fallbacks used when the server catalog omits them or cannot be loaded.
+         * Server-provided metadata takes precedence by command name, while localized fallback
+         * descriptions are resolved at Compose display boundaries.
          */
         private val BUILTIN_COMMANDS = listOf(
             Command(name = "compact", source = CommandSource.BuiltIn),
@@ -253,6 +336,10 @@ class ChatViewModel constructor(
         modelAgentManager.loadAgents()
         modelAgentManager.loadModels()
         observeEvents()
+        refreshPendingForms()
+        viewModelScope.launch {
+            connectionState.filter { it.isConnected }.collect { refreshPendingForms() }
+        }
         loadVcsInfo()
     }
 
@@ -267,6 +354,7 @@ class ChatViewModel constructor(
     fun markAsRead() {
         _isActiveTab.value = true
         _hasUnreadResponse.value = false
+        refreshPendingForms()
     }
 
     fun markInactive() {
@@ -274,8 +362,25 @@ class ChatViewModel constructor(
     }
 
     fun updateInput(text: String) {
-        persistInputText(text)
-        _uiState.update { it.copy(inputText = text) }
+        val pendingSubmission = pendingComposerSubmission
+        if (pendingSubmission?.failed == true && text.isEmpty()) {
+            pendingComposerSubmission = pendingSubmission.copy(clearAcknowledged = true)
+            failComposerSubmission(pendingSubmission.submission)
+            return
+        }
+        val effectiveText = when {
+            pendingSubmission == null -> text
+            text.isNotEmpty() -> {
+                pendingComposerSubmission = null
+                text
+            }
+            else -> {
+                pendingComposerSubmission = pendingSubmission.copy(clearAcknowledged = true)
+                text
+            }
+        }
+        persistInputText(effectiveText)
+        _uiState.update { it.copy(inputText = effectiveText) }
     }
 
     fun clearError() {
@@ -291,6 +396,7 @@ class ChatViewModel constructor(
             endLoadStep("Loading session metadata")
             when (result) {
                 is ApiResult.Success -> {
+                    modelAgentManager.applyServerSessionModel(result.data.model)
                     val session = SessionMapper.mapToDomain(result.data)
                     _uiState.update { it.copy(session = session) }
                     // Reload VCS now that we have the canonical session directory
@@ -394,31 +500,80 @@ class ChatViewModel constructor(
         }
     }
 
-    private var lastResponseCompletedToken = 0L
-
+    @Suppress("CyclomaticComplexMethod")
     private fun applyRepositorySessionState(state: dev.blazelight.p4oc.data.session.SessionUiState) {
         dialogManager.setPermissionsByCallId(state.pendingPermissionsByCallId)
         dialogManager.setPendingQuestion(state.pendingQuestion)
 
         val isBusy = state.status is SessionStatus.Busy || state.status is SessionStatus.Retry
+        val isTerminalTransition = hasResponseTokenBaseline &&
+            state.responseCompletedToken > lastResponseCompletedToken
+        val terminalBelongsToCurrentInit = isTerminalTransition &&
+            terminalBelongsToCurrentInit(state.responseCompletedToken)
+        val isUnrelatedTerminalDuringInit = isTerminalTransition &&
+            currentInitOperationGeneration != null &&
+            !terminalBelongsToCurrentInit
+        if (!hasResponseTokenBaseline) {
+            // The first collected repository state is the subscription snapshot, not a fresh
+            // completion: adopt its token as the baseline so a token accumulated before this
+            // ViewModel attached (e.g. a run completed in another tab holding the same session)
+            // can never fire a spurious completion haptic/unread badge or act as a false
+            // terminal boundary for notices and the bounded poll.
+            hasResponseTokenBaseline = true
+            lastResponseCompletedToken = state.responseCompletedToken
+        }
+        if (isBusy || (isTerminalTransition && !isUnrelatedTerminalDuringInit)) {
+            // The run is confirmed active (its Busy transition already cleared the previous run's
+            // repository error) or has genuinely completed (a fresh terminal error is real, not
+            // stale). Either way, stale-error suppression for the in-flight send ends now, before
+            // the error below is computed.
+            suppressStaleRunErrors = false
+        }
         val errorMessage = state.error?.takeUnless { it.isAborted() }?.toHumanMessage()
+        val retryNotice = (state.status as? SessionStatus.Retry)?.toHumanMessage()
         _uiState.update {
+            val ownsCommandEndpoint = commandDispatchOwner.get() != NO_COMMAND_DISPATCH_OWNER
             it.copy(
                 session = state.session ?: it.session,
-                isBusy = isBusy,
-                isSending = if (state.status != null) false else it.isSending,
+                isBusy = if (isUnrelatedTerminalDuringInit) it.isBusy else isBusy,
+                isSending = when {
+                    ownsCommandEndpoint -> true
+                    state.status != null && !isUnrelatedTerminalDuringInit -> false
+                    else -> it.isSending
+                },
                 todos = state.todos,
-                error = errorMessage ?: it.error,
+                error = if (
+                    ownsCommandEndpoint || suppressStaleRunErrors || isUnrelatedTerminalDuringInit
+                ) {
+                    it.error
+                } else {
+                    errorMessage ?: it.error
+                },
+                runNotice = if (isUnrelatedTerminalDuringInit) {
+                    it.runNotice
+                } else {
+                    resolveRunNotice(it.runNotice, retryNotice, isTerminalTransition, isBusy)
+                },
             )
         }
 
-        if (state.responseCompletedToken > lastResponseCompletedToken) {
+        if (isTerminalTransition) {
+            if (!isUnrelatedTerminalDuringInit) {
+                responseReconciliationJob?.cancel()
+                responseReconciliationJob = null
+            }
+            if (terminalBelongsToCurrentInit) invalidateInitOperation()
             lastResponseCompletedToken = state.responseCompletedToken
-            if (state.error?.isAborted() != true) {
+            if (!isUnrelatedTerminalDuringInit && state.error?.isAborted() != true) {
                 _hasUnreadResponse.value = !_isActiveTab.value
                 handleResponseCompleted()
             }
         }
+    }
+
+    private fun terminalBelongsToCurrentInit(responseCompletedToken: Long): Boolean {
+        val baseline = initTerminalTokenBaseline ?: return false
+        return initRequestJob == null && responseCompletedToken > baseline
     }
 
     private fun handleResponseCompleted() {
@@ -426,34 +581,79 @@ class ChatViewModel constructor(
         hapticFeedback.vibrate(settings.vibrationPattern)
     }
 
+    private fun resolveRunNotice(
+        current: String?,
+        retryNotice: String?,
+        isTerminalTransition: Boolean,
+        isBusy: Boolean,
+    ): String? = when {
+        // A terminal boundary (completion, stop, or terminal error) retires any notice.
+        isTerminalTransition -> null
+        retryNotice != null -> retryNotice
+        // The bounded poll's stalled-run warning stays visible across unrelated repository
+        // emissions (todos, permissions, session updates) while the run remains busy; only
+        // send/stop/terminal boundaries clear it. A non-busy emission also retires it: the
+        // warning ("the run may still be active") is meaningless once the run is not running.
+        isBusy && current == RUN_STALLED_NOTICE -> current
+        else -> null
+    }
+
     // --- Message sending ---
 
-    fun sendMessage() {
-        val text = _uiState.value.inputText.trim()
+    @Suppress("ReturnCount")
+    fun sendMessage(): Boolean {
+        val input = _uiState.value.inputText
+        val text = input.trim()
         val attachedFiles = filePickerManager.attachedFiles.value
-        if (text.isEmpty() && attachedFiles.isEmpty()) return
+        attachmentError(attachedFiles)?.let { message ->
+            _uiState.update { it.copy(error = message) }
+            return false
+        }
+        if (text.isEmpty() && attachedFiles.isEmpty()) return false
         if (attachedFiles.isEmpty() && text.startsWith("/")) {
-            sendSlashCommand(text)
-            return
+            return sendSlashCommand(text, input)
+        }
+        if (attachedFiles.any { !it.available }) {
+            _uiState.update { it.copy(error = UNAVAILABLE_ATTACHMENTS_ERROR) }
+            return false
         }
 
-        _uiState.update { it.copy(isSending = true) }
+        // A replacement send must supersede any in-flight reconciliation from a prior send so the
+        // old poll can never reconcile the wrong assistant/status against the new run.
+        invalidateInitOperation()
+        responseReconciliationJob?.cancel()
+        responseReconciliationJob = null
+        val submission = beginComposerSubmission(input)
+        suppressStaleRunErrors = true
+        _uiState.update { it.copy(isSending = true, error = null, runNotice = null) }
         viewModelScope.launch {
             val validatedFiles = filePickerManager.validateAttachedFiles()
             if (validatedFiles.any { !it.available }) {
+                suppressStaleRunErrors = false
                 _uiState.update { it.copy(error = UNAVAILABLE_ATTACHMENTS_ERROR, isSending = false) }
+                failComposerSubmission(submission)
                 return@launch
             }
 
-            sendValidatedMessage(text, validatedFiles)
+            sendValidatedMessage(text, validatedFiles, submission)
         }
+        return true
     }
 
-    private suspend fun sendValidatedMessage(text: String, attachedFiles: List<SelectedFile>) {
+    private suspend fun sendValidatedMessage(
+        text: String,
+        attachedFiles: List<SelectedFile>,
+        submission: ComposerSubmission?,
+    ) {
+        attachmentError(attachedFiles)?.let { message ->
+            _uiState.update { it.copy(error = message, isSending = false) }
+            failComposerSubmission(submission)
+            return
+        }
+        val knownMessageIds = messages.value.mapTo(mutableSetOf()) { it.message.id }
         val selectedAgent = modelAgentManager.selectedAgent.value
         val selectedModel = modelAgentManager.selectedModel.value
         val selectedVariant = modelAgentManager.currentReasoningEffort()
-        updateInput("")
         filePickerManager.clearAttachedFiles()
 
         val parts = buildPartInputs(text, attachedFiles)
@@ -461,35 +661,200 @@ class ChatViewModel constructor(
             parts = parts,
             agent = selectedAgent,
             model = selectedModel,
-            variant = selectedVariant
+            variant = selectedVariant,
         )
 
         val result = sessionRepository.sendMessageAsync(SessionId(sessionId), request).await().toApiResult()
         when (result) {
             is ApiResult.Success -> {
-                _uiState.update { it.copy(isSending = false, isBusy = true) }
+                completeComposerSubmission(submission)
+                modelAgentManager.markComposerSelectionSent(selectedModel, selectedVariant)
+                sessionRepository.acceptEvent(
+                    OpenCodeEvent.SessionStatusChanged(sessionId, SessionStatus.Busy),
+                )
+                _uiState.update { it.copy(isSending = false, isBusy = true, runNotice = null) }
+                startResponseReconciliation(knownMessageIds)
                 AppLog.d(TAG, "sendMessage: Async call succeeded, waiting for SSE events")
             }
             is ApiResult.Error -> {
+                suppressStaleRunErrors = false
                 _uiState.update {
                     it.copy(
                         isSending = false,
-                        error = "Could not send the message. Check the connection and try again."
+                        error = "Could not send the message. Check the connection and try again.",
                     )
                 }
-                updateInput(text)
+                failComposerSubmission(submission)
                 filePickerManager.restoreAttachedFiles(attachedFiles)
             }
         }
     }
 
-    private fun sendSlashCommand(text: String) {
+    @Suppress("CyclomaticComplexMethod")
+    private fun startResponseReconciliation(
+        knownMessageIds: Set<String>,
+        initOwnerGeneration: Long? = null,
+    ) {
+        if (!ownsResponseReconciliation(initOwnerGeneration)) return
+        responseReconciliationJob?.cancel()
+        if (!ownsResponseReconciliation(initOwnerGeneration)) return
+        responseReconciliationJob = viewModelScope.launch {
+            var lastNewAssistant: MessageWithParts? = null
+            var observedRetry = false
+
+            RESPONSE_RECONCILIATION_DELAYS_MS.forEach { delayMs ->
+                delay(delayMs)
+                if (!ownsResponseReconciliation(initOwnerGeneration)) return@launch
+                if (!_uiState.value.isBusy) return@launch
+
+                val status = runCatching {
+                    workspaceClient.getSessionStatuses(workspaceClient.workspace.directory)[sessionId]
+                }.onFailure { error ->
+                    if (error is CancellationException) throw error
+                }.getOrNull()?.let(SessionMapper::mapStatusToDomain)
+                if (!ownsResponseReconciliation(initOwnerGeneration)) return@launch
+                observedRetry = observedRetry || status is SessionStatus.Retry
+
+                // Reconcile canonical messages BEFORE publishing any status. A terminal Idle
+                // published first bumps responseCompletedToken, whose collector cancels this very
+                // job while the recovery fetch is still in flight — the run then ends with the
+                // completed assistant reachable only via REST and no user-facing explanation.
+                // The repository's canonical active-lease, revision-safe recovery primitive is
+                // reused rather than a second message buffer or an unsafe overwrite path.
+                runCatching {
+                    sessionRepository.reconcileMessages(SessionId(sessionId))
+                }.onFailure { error ->
+                    if (error is CancellationException) throw error
+                }
+                if (!ownsResponseReconciliation(initOwnerGeneration)) return@launch
+                lastNewAssistant = messages.value.asReversed().firstOrNull { messageWithParts ->
+                    messageWithParts.message.id !in knownMessageIds &&
+                        messageWithParts.message is Message.Assistant
+                } ?: lastNewAssistant
+
+                completedAssistantEvent(lastNewAssistant, status)?.let { event ->
+                    if (!ownsResponseReconciliation(initOwnerGeneration)) return@launch
+                    sessionRepository.acceptEvent(event)
+                    return@launch
+                }
+
+                // No assistant completed yet: only non-terminal statuses may be published. A REST
+                // Idle with no new assistant must not terminate the run (or cancel this poll);
+                // keep polling until an assistant appears or the bounded window is exhausted.
+                if (status is SessionStatus.Busy || status is SessionStatus.Retry) {
+                    if (!ownsResponseReconciliation(initOwnerGeneration)) return@launch
+                    sessionRepository.acceptEvent(OpenCodeEvent.SessionStatusChanged(sessionId, status))
+                }
+            }
+
+            if (!ownsResponseReconciliation(initOwnerGeneration)) return@launch
+            if (!_uiState.value.isBusy) return@launch
+            if (!observedRetry) {
+                _uiState.update { it.copy(runNotice = RUN_STALLED_NOTICE) }
+            }
+        }
+    }
+
+    private fun ownsResponseReconciliation(initOwnerGeneration: Long?): Boolean =
+        initOwnerGeneration == null || isCurrentInitOperation(initOwnerGeneration)
+
+    private fun completedAssistantEvent(
+        messageWithParts: MessageWithParts?,
+        status: SessionStatus?,
+    ): OpenCodeEvent? {
+        val assistant = messageWithParts?.message as? Message.Assistant ?: return null
+        return when {
+            // An authoritative Busy/Retry just fetched from REST means nothing terminal was
+            // missed: multi-step runs emit one assistant message per step, so a completed
+            // intermediate assistant mid-run must never synthesize a terminal Idle/Error (false
+            // completion haptic, unread badge, poll cancellation). The caller republishes the
+            // non-terminal status and keeps polling.
+            status is SessionStatus.Busy || status is SessionStatus.Retry -> null
+            assistant.error != null -> OpenCodeEvent.SessionError(sessionId, assistant.error)
+            assistant.completedAt == null && status !is SessionStatus.Idle -> null
+            messageWithParts.parts.isEmpty() -> OpenCodeEvent.SessionError(
+                sessionId,
+                MessageError(
+                    name = "EmptyResponseError",
+                    message = "The model completed without returning content",
+                ),
+            )
+            else -> OpenCodeEvent.SessionStatusChanged(sessionId, SessionStatus.Idle)
+        }
+    }
+
+    private fun sendSlashCommand(text: String, submittedDraft: String): Boolean {
         val commandText = text.removePrefix("/")
         val commandName = commandText.substringBefore(" ").trim()
-        if (commandName.isEmpty()) return
+        if (commandName.isEmpty()) return false
         val arguments = commandText.substringAfter(" ", "").trim()
-        updateInput("")
-        executeCommand(commandName, arguments)
+        return executeCommand(commandName, arguments, submittedDraft)
+    }
+
+    private fun beginComposerSubmission(draft: String?): ComposerSubmission? {
+        pendingComposerSubmission = null
+        if (draft == null) return null
+        val submission = ComposerSubmission(
+            generation = ++composerSubmissionGeneration,
+            draft = draft,
+        )
+        pendingComposerSubmission = PendingComposerSubmission(submission)
+        return submission
+    }
+
+    private fun completeComposerSubmission(submission: ComposerSubmission?) {
+        if (pendingComposerSubmission?.submission?.generation == submission?.generation) {
+            pendingComposerSubmission = null
+        }
+    }
+
+    private fun failComposerSubmission(submission: ComposerSubmission?) {
+        val pendingSubmission = pendingComposerSubmission
+            ?.takeIf { it.submission.generation == submission?.generation }
+            ?: return
+        if (pendingSubmission.clearAcknowledged || _uiState.value.inputText.isEmpty()) {
+            pendingComposerSubmission = null
+            val draft = pendingSubmission.submission.draft
+            persistInputText(draft)
+            _uiState.update {
+                it.copy(
+                    inputText = draft,
+                    inputSyncGeneration = it.inputSyncGeneration + 1,
+                )
+            }
+        } else {
+            pendingComposerSubmission = pendingSubmission.copy(failed = true)
+        }
+    }
+
+    private fun discardPendingComposerSubmission() {
+        pendingComposerSubmission = null
+    }
+
+    private fun attachmentError(files: List<SelectedFile>): String? {
+        if (files.isEmpty() && !filePickerManager.hasUnresolvedUploads) return null
+        val selected = modelAgentManager.selectedModel.value
+        val model =
+            modelAgentManager.availableModels.value
+                .firstOrNull { (provider, model) ->
+                    provider == selected?.providerID && model.id == selected?.modelID
+                }
+                ?.second
+        val unsupportedImage =
+            model?.capabilities?.input?.image == false &&
+                files.any {
+                    (it.mimeType ?: FilenameMimeType.resolveOrOctetStream(it.name)).startsWith("image/")
+                }
+        return when {
+            filePickerManager.hasUnresolvedUploads ->
+                "Finish reviewing uploads, or retry or remove failed uploads before sending."
+            files.isEmpty() -> null
+            workspaceClient.workspace.directory == null ->
+                "Open a project workspace before attaching files."
+            unsupportedImage ->
+                "This model does not accept images. Choose an image-capable model or remove the images."
+            else -> null
+        }
     }
 
     private fun buildPartInputs(text: String, files: List<SelectedFile>): List<PartInputDto> {
@@ -503,18 +868,11 @@ class ChatViewModel constructor(
                     type = "file",
                     filename = file.name,
                     mime = file.mimeType ?: FilenameMimeType.resolveOrOctetStream(file.name),
-                    url = file.toOpenCodeFileUrl()
-                )
+                    url = file.toOpenCodeFileUrl(requireNotNull(workspaceClient.workspace.directory)),
+                ),
             )
         }
         return parts
-    }
-
-    private fun SelectedFile.toOpenCodeFileUrl(): String {
-        val workspaceDirectory = workspaceClient.workspace.directory
-            ?: throw IllegalStateException("Cannot attach workspace file without a workspace directory")
-        val absolutePath = File(workspaceDirectory, path).normalize().path
-        return URI("file", null, absolutePath, null).toASCIIString()
     }
 
     // --- Permission / question responses ---
@@ -522,7 +880,11 @@ class ChatViewModel constructor(
     fun respondToPermission(permissionId: String, response: String) {
         viewModelScope.launch {
             val request = PermissionResponseRequest(reply = response)
-            when (val result = safeApiCall { workspaceClient.respondToPermission(sessionId, permissionId, request) }) {
+            // A subagent's permission is shown here but belongs to the child session; v2 validates that owner.
+            val owningSessionId = dialogManager.pendingPermissionsByCallId.value.values
+                .firstOrNull { it.id == permissionId }?.sessionID ?: sessionId
+            val result = safeApiCall { workspaceClient.respondToPermission(owningSessionId, permissionId, request) }
+            when (result) {
                 is ApiResult.Success -> {
                     dialogManager.clearPermission(permissionId)
                     sessionRepository.clearPermission(SessionId(sessionId), permissionId)
@@ -547,7 +909,7 @@ class ChatViewModel constructor(
                 is ApiResult.Success -> sessionRepository.clearQuestion(SessionId(sessionId), requestId)
                 is ApiResult.Error -> _uiState.update {
                     it.copy(
-                        error = "Could not answer the question. Try again."
+                        error = "Could not answer the question. Try again.",
                     )
                 }
             }
@@ -561,6 +923,7 @@ class ChatViewModel constructor(
             // goes idle). The local modal is cleared optimistically; the matching
             // question.rejected SSE event (handled in SessionRepositoryImpl) will
             // also reconcile any other attached client.
+
             when (val result = safeApiCall { workspaceClient.rejectQuestion(sessionId, requestId) }) {
                 is ApiResult.Success -> sessionRepository.clearQuestion(SessionId(sessionId), requestId)
                 is ApiResult.Error -> {
@@ -573,6 +936,200 @@ class ChatViewModel constructor(
         }
     }
 
+    /** Reconcile v2-only pending forms after opening or returning to this session. */
+    fun refreshPendingForms() {
+        if (!workspaceClient.supportsV2Forms) return
+        if (pendingV2FormsRefreshJob?.isActive == true) {
+            pendingV2FormsRefreshRequested = true
+            return
+        }
+        pendingV2FormsRefreshRequested = false
+        pendingV2FormsRefreshJob = viewModelScope.launch {
+            var refreshAgain: Boolean
+            do {
+                _pendingV2Forms.update { it.copy(isLoading = true, error = null) }
+                when (val result = safeApiCall { workspaceClient.listPendingForms(sessionId) }) {
+                    is ApiResult.Success -> {
+                        val summaries = result.data.orEmpty()
+                        val hasForeignForm = summaries.any { it.sessionID != sessionId }
+                        val pending = summaries.filter { it.sessionID == sessionId }.distinctBy(V2FormInfo::id)
+                        _pendingV2Forms.update { current ->
+                            val previous = current.forms.associateBy(PendingV2FormUi::id)
+                            current.copy(
+                                isLoading = false,
+                                error = if (hasForeignForm) {
+                                    "The server returned a form for a different chat. Refresh to try again."
+                                } else {
+                                    null
+                                },
+                                forms = pending.map { summary ->
+                                    val existing = previous[summary.id]
+                                    if (existing == null) {
+                                        PendingV2FormUi(id = summary.id)
+                                    } else {
+                                        existing.copy(isLoading = !existing.isSubmitting)
+                                    }
+                                },
+                            )
+                        }
+                        pending.forEach { summary ->
+                            val item = _pendingV2Forms.value.forms.firstOrNull { it.id == summary.id }
+                            if (item?.isSubmitting != true) loadPendingForm(summary.id, preserveError = true)
+                        }
+                    }
+                    is ApiResult.Error -> {
+                        AppLog.w(TAG, "Failed to load pending v2 forms")
+                        _pendingV2Forms.update {
+                            it.copy(
+                                isLoading = false,
+                                error = "Could not check for pending forms. Check the connection and try again.",
+                            )
+                        }
+                    }
+                }
+                refreshAgain = pendingV2FormsRefreshRequested
+                pendingV2FormsRefreshRequested = false
+            } while (refreshAgain)
+        }
+    }
+
+    fun retryPendingForm(formId: String) {
+        if (workspaceClient.supportsV2Forms) loadPendingForm(formId, preserveError = false)
+    }
+
+    private fun loadPendingForm(formId: String, preserveError: Boolean) {
+        val current = _pendingV2Forms.value.forms.firstOrNull { it.id == formId } ?: return
+        if (current.isSubmitting) return
+        markPendingFormLoading(formId, preserveError)
+        viewModelScope.launch {
+            when (val result = safeApiCall { workspaceClient.getPendingForm(sessionId, formId) }) {
+                is ApiResult.Success -> {
+                    val form = result.data
+                    if (form.id != formId || form.sessionID != sessionId) {
+                        updatePendingForm(formId) {
+                            it.copy(
+                                isLoading = false,
+                                form = null,
+                                error = "This form does not belong to the current chat.",
+                            )
+                        }
+                    } else {
+                        when (form.state?.status) {
+                            "pending" -> updatePendingForm(formId) { item ->
+                                item.copy(
+                                    isLoading = false,
+                                    form = form,
+                                    error = if (preserveError) item.error else null,
+                                )
+                            }
+                            "answered", "cancelled" -> removePendingForm(formId)
+                            else -> updatePendingForm(formId) {
+                                it.copy(
+                                    isLoading = false,
+                                    form = null,
+                                    error = "Could not verify that this form is still pending. Refresh to try again.",
+                                )
+                            }
+                        }
+                    }
+                }
+                is ApiResult.Error -> {
+                    AppLog.w(TAG, "Failed to load pending v2 form")
+                    if (result.isFormSettled()) {
+                        removePendingForm(formId)
+                    } else {
+                        updatePendingForm(formId) {
+                            it.copy(isLoading = false, error = "Could not load this form. Refresh to try again.")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun markPendingFormLoading(formId: String, preserveError: Boolean) {
+        _pendingV2Forms.update { state ->
+            state.copy(
+                forms = state.forms.map { item ->
+                    if (item.id == formId) {
+                        item.copy(
+                            isLoading = true,
+                            error = if (preserveError) item.error else null,
+                        )
+                    } else {
+                        item
+                    }
+                },
+            )
+        }
+    }
+
+    fun respondToForm(formId: String, answer: JsonObject) {
+        val current = _pendingV2Forms.value.forms.firstOrNull { it.id == formId } ?: return
+        if (current.isSubmitting || current.form == null) return
+        updatePendingForm(formId) { it.copy(isSubmitting = true, error = null) }
+        viewModelScope.launch {
+            when (val result = safeApiCall { workspaceClient.replyToForm(sessionId, formId, answer) }) {
+                is ApiResult.Success -> {
+                    removePendingForm(formId)
+                    refreshPendingForms()
+                }
+                is ApiResult.Error -> {
+                    AppLog.w(TAG, "Failed to submit pending v2 form")
+                    if (result.isFormSettled()) {
+                        removePendingForm(formId)
+                    } else {
+                        updatePendingForm(formId) {
+                            it.copy(
+                                isSubmitting = false,
+                                error = "Could not submit this form. Check the connection and try again.",
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fun rejectPendingForm(formId: String) {
+        val current = _pendingV2Forms.value.forms.firstOrNull { it.id == formId } ?: return
+        if (current.isSubmitting || current.form == null) return
+        updatePendingForm(formId) { it.copy(isSubmitting = true, error = null) }
+        viewModelScope.launch {
+            when (val result = safeApiCall { workspaceClient.rejectForm(sessionId, formId) }) {
+                is ApiResult.Success -> {
+                    removePendingForm(formId)
+                    refreshPendingForms()
+                }
+                is ApiResult.Error -> {
+                    AppLog.w(TAG, "Failed to reject pending v2 form")
+                    if (result.isFormSettled()) {
+                        removePendingForm(formId)
+                    } else {
+                        updatePendingForm(formId) {
+                            it.copy(
+                                isSubmitting = false,
+                                error = "Could not reject this form. Check the connection and try again.",
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun updatePendingForm(formId: String, transform: (PendingV2FormUi) -> PendingV2FormUi) {
+        _pendingV2Forms.update { state ->
+            state.copy(forms = state.forms.map { item -> if (item.id == formId) transform(item) else item })
+        }
+    }
+
+    private fun removePendingForm(formId: String) {
+        _pendingV2Forms.update { state -> state.copy(forms = state.forms.filterNot { it.id == formId }) }
+    }
+
+    private fun ApiResult.Error.isFormSettled(): Boolean = code == HTTP_NOT_FOUND || code == HTTP_CONFLICT
+
     // --- Commands & Todos ---
 
     fun loadCommands() {
@@ -581,7 +1138,7 @@ class ChatViewModel constructor(
                 it.copy(
                     isLoadingCommands = true,
                     commandLoadError = null,
-                    commands = it.commands.ifEmpty { BUILTIN_COMMANDS }
+                    commands = it.commands.ifEmpty { BUILTIN_COMMANDS },
                 )
             }
             beginLoadStep("Loading slash commands")
@@ -591,13 +1148,13 @@ class ChatViewModel constructor(
                 is ApiResult.Success -> {
                     AppLog.d(TAG, "loadCommands: Got ${result.data.size} commands from API")
                     val apiCommands = result.data.map { CommandMapper.mapToDomain(it) }
-                    val allCommands = (BUILTIN_COMMANDS + apiCommands).distinctBy { it.name }
+                    val allCommands = mergeCommands(apiCommands, BUILTIN_COMMANDS)
                     _uiState.update {
                         it.copy(
                             commands = allCommands,
                             isLoadingCommands = false,
                             hasLoadedWorkspaceCommands = true,
-                            commandLoadError = null
+                            commandLoadError = null,
                         )
                     }
                 }
@@ -608,7 +1165,7 @@ class ChatViewModel constructor(
                             commands = it.commands.ifEmpty { BUILTIN_COMMANDS },
                             isLoadingCommands = false,
                             hasLoadedWorkspaceCommands = false,
-                            commandLoadError = "Could not load workspace commands. Try again."
+                            commandLoadError = "Could not load workspace commands. Try again.",
                         )
                     }
                 }
@@ -623,7 +1180,7 @@ class ChatViewModel constructor(
                     val apiCommands = result.data.map(CommandMapper::mapToDomain)
                     _uiState.update {
                         it.copy(
-                            commands = (BUILTIN_COMMANDS + apiCommands).distinctBy(Command::name),
+                            commands = mergeCommands(apiCommands, BUILTIN_COMMANDS),
                             hasLoadedWorkspaceCommands = true,
                         )
                     }
@@ -641,31 +1198,290 @@ class ChatViewModel constructor(
         }
     }
 
-    fun executeCommand(commandName: String, arguments: String) {
-        when (commandName.trim().lowercase()) {
-            "undo" -> undoSessionCommand()
-            "redo" -> redoSessionCommand()
-            else -> executeServerCommand(commandName, arguments)
+    fun executeCommand(
+        commandName: String,
+        arguments: String,
+        submittedDraft: String? = null,
+    ): Boolean {
+        val dispatchOwner = tryClaimCommandDispatch() ?: return false
+
+        return when (commandName.trim().lowercase()) {
+            "undo" -> undoSessionCommand(dispatchOwner, submittedDraft)
+            "redo" -> redoSessionCommand(dispatchOwner, submittedDraft)
+            "init" -> initializeSession(dispatchOwner, submittedDraft)
+            else -> {
+                val submission = beginComposerSubmission(submittedDraft)
+                executeServerCommand(commandName, arguments, dispatchOwner, submission)
+                true
+            }
         }
     }
 
-    private fun executeServerCommand(commandName: String, arguments: String) {
-        viewModelScope.launch {
-            _uiState.update { it.copy(isSending = true) }
-            val request = ExecuteCommandRequest(
-                command = commandName,
-                arguments = arguments
-            )
-            val result = safeApiCall { workspaceClient.executeCommand(sessionId, request) }
-            when (result) {
-                is ApiResult.Success -> {
-                    _uiState.update { it.copy(isSending = false, isBusy = true) }
-                }
-                is ApiResult.Error -> {
+    @Suppress("ComplexCondition", "ReturnCount")
+    private fun tryClaimCommandDispatch(): Long? {
+        val dispatchOwner = commandDispatchGeneration.incrementAndGet()
+        while (true) {
+            val state = _uiState.value
+            if (
+                commandDispatchOwner.get() != NO_COMMAND_DISPATCH_OWNER ||
+                state.isSending ||
+                state.isBusy ||
+                currentInitOperationGeneration != null
+            ) {
+                _uiState.update { it.copy(error = COMMAND_REFUSED_WHILE_RUNNING_ERROR) }
+                return null
+            }
+            if (_uiState.compareAndSet(state, state.copy(isSending = true, error = null))) {
+                if (commandDispatchOwner.compareAndSet(NO_COMMAND_DISPATCH_OWNER, dispatchOwner)) {
+                    // A repository emission can race the UI CAS above. Once the durable owner is
+                    // installed, project its sending state again so the endpoint is never in
+                    // flight while the UI appears dispatchable. Preserve a refusal another caller
+                    // may already have published during that race.
                     _uiState.update {
-                        it.copy(isSending = false, error = "Could not execute the command. Try again.")
+                        it.copy(
+                            isSending = true,
+                            error = it.error?.takeIf { error ->
+                                error == COMMAND_REFUSED_WHILE_RUNNING_ERROR
+                            },
+                        )
+                    }
+                    return dispatchOwner
+                }
+
+                // Another caller won ownership after an unrelated repository emission reopened
+                // the UI-state CAS window. Its owner keeps isSending asserted; this caller only
+                // contributes the visible refusal.
+                _uiState.update { it.copy(error = COMMAND_REFUSED_WHILE_RUNNING_ERROR) }
+                return null
+            }
+        }
+    }
+
+    private inline fun finishCommandDispatch(
+        dispatchOwner: Long,
+        updateUi: (ChatUiState) -> ChatUiState,
+    ): Boolean {
+        if (!commandDispatchOwner.compareAndSet(dispatchOwner, NO_COMMAND_DISPATCH_OWNER)) {
+            return false
+        }
+        _uiState.update(updateUi)
+        return true
+    }
+
+    private fun releaseCommandDispatch(dispatchOwner: Long) {
+        finishCommandDispatch(dispatchOwner) { it.copy(isSending = false) }
+    }
+
+    private fun releaseActiveCommandDispatch(clearSending: Boolean) {
+        while (true) {
+            val dispatchOwner = commandDispatchOwner.get()
+            if (dispatchOwner == NO_COMMAND_DISPATCH_OWNER) return
+            if (commandDispatchOwner.compareAndSet(dispatchOwner, NO_COMMAND_DISPATCH_OWNER)) {
+                if (currentInitCommandDispatchOwner == dispatchOwner) {
+                    currentInitCommandDispatchOwner = null
+                }
+                if (clearSending) {
+                    _uiState.update { it.copy(isSending = false) }
+                }
+                return
+            }
+        }
+    }
+
+    private fun initializeSession(dispatchOwner: Long, submittedDraft: String?): Boolean {
+        val selectedModel = modelAgentManager.selectedModel.value
+        if (selectedModel == null) {
+            suppressStaleRunErrors = false
+            finishCommandDispatch(dispatchOwner) {
+                it.copy(
+                    isSending = false,
+                    error = "Select a model before initializing the session.",
+                )
+            }
+            return false
+        }
+
+        val submission = beginComposerSubmission(submittedDraft)
+        val operationGeneration = ++initOperationGeneration
+        currentInitOperationGeneration = operationGeneration
+        currentInitCommandDispatchOwner = dispatchOwner
+        initTerminalTokenBaseline = null
+        responseReconciliationJob?.cancel()
+        responseReconciliationJob = null
+        suppressStaleRunErrors = true
+        val knownMessageIds = messages.value.mapTo(mutableSetOf()) { it.message.id }
+        val request = InitSessionRequest(
+            messageID = "msg_${UUID.randomUUID()}",
+            providerID = selectedModel.providerID,
+            modelID = selectedModel.modelID,
+        )
+
+        _uiState.update { it.copy(isSending = true, error = null, runNotice = null) }
+        val requestJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            var endpointCompleted = false
+            try {
+                val result = safeApiCall {
+                    sessionRepository.initSession(SessionId(sessionId), request)
+                }
+                when (result) {
+                    is ApiResult.Success -> handleInitCompletion(
+                        operationGeneration,
+                        dispatchOwner,
+                        result.data,
+                        knownMessageIds,
+                        submission,
+                    )
+                    is ApiResult.Error -> publishInitFailure(operationGeneration, dispatchOwner, submission)
+                }
+                endpointCompleted = true
+            } finally {
+                if (!endpointCompleted) {
+                    cancelInitCommandDispatch(operationGeneration, dispatchOwner, submission)
+                }
+            }
+        }
+        initRequestJob = requestJob
+        requestJob.invokeOnCompletion { cause ->
+            if (cause != null) cancelInitCommandDispatch(operationGeneration, dispatchOwner, submission)
+        }
+        requestJob.start()
+        return true
+    }
+
+    @Suppress("ReturnCount")
+    private fun handleInitCompletion(
+        operationGeneration: Long,
+        dispatchOwner: Long,
+        succeeded: Boolean,
+        knownMessageIds: Set<String>,
+        submission: ComposerSubmission?,
+    ) {
+        if (!isCurrentInitOperation(operationGeneration)) return
+        if (!succeeded) {
+            publishInitFailure(operationGeneration, dispatchOwner, submission)
+            return
+        }
+
+        if (!isCurrentInitOperation(operationGeneration)) return
+        sessionRepository.acceptEvent(
+            OpenCodeEvent.SessionStatusChanged(sessionId, SessionStatus.Busy),
+        )
+        if (!isCurrentInitOperation(operationGeneration)) return
+        initTerminalTokenBaseline = repositorySessionState.value.responseCompletedToken
+        if (!isCurrentInitOperation(operationGeneration)) return
+        if (
+            !finishCommandDispatch(dispatchOwner) {
+                it.copy(isSending = false, isBusy = true, runNotice = null)
+            }
+        ) {
+            return
+        }
+        completeComposerSubmission(submission)
+        currentInitCommandDispatchOwner = null
+        if (!isCurrentInitOperation(operationGeneration)) return
+        startResponseReconciliation(knownMessageIds, operationGeneration)
+        if (isCurrentInitOperation(operationGeneration)) {
+            initRequestJob = null
+        }
+    }
+
+    @Suppress("ReturnCount")
+    private fun publishInitFailure(
+        operationGeneration: Long,
+        dispatchOwner: Long,
+        submission: ComposerSubmission?,
+    ) {
+        if (!isCurrentInitOperation(operationGeneration)) return
+        suppressStaleRunErrors = false
+        if (!isCurrentInitOperation(operationGeneration)) return
+        if (
+            !finishCommandDispatch(dispatchOwner) {
+                it.copy(
+                    isSending = false,
+                    error = "Could not initialize the session. Try again.",
+                )
+            }
+        ) {
+            return
+        }
+        failComposerSubmission(submission)
+        currentInitCommandDispatchOwner = null
+        completeInitOperation(operationGeneration)
+    }
+
+    private fun cancelInitCommandDispatch(
+        operationGeneration: Long,
+        dispatchOwner: Long,
+        submission: ComposerSubmission?,
+    ) {
+        // Invalidation owns release for a superseded generation, including whether an abort keeps
+        // the sending presentation asserted while its own endpoint is pending.
+        if (!isCurrentInitOperation(operationGeneration)) return
+        suppressStaleRunErrors = false
+        releaseCommandDispatch(dispatchOwner)
+        completeComposerSubmission(submission)
+        currentInitCommandDispatchOwner = null
+        completeInitOperation(operationGeneration)
+    }
+
+    private fun isCurrentInitOperation(generation: Long): Boolean =
+        currentInitOperationGeneration == generation
+
+    private fun completeInitOperation(generation: Long) {
+        if (!isCurrentInitOperation(generation)) return
+        currentInitOperationGeneration = null
+        currentInitCommandDispatchOwner = null
+        initRequestJob = null
+        initTerminalTokenBaseline = null
+    }
+
+    private fun invalidateInitOperation(clearSending: Boolean = true) {
+        val dispatchOwner = currentInitCommandDispatchOwner
+        discardPendingComposerSubmission()
+        initOperationGeneration += 1
+        currentInitOperationGeneration = null
+        currentInitCommandDispatchOwner = null
+        initRequestJob?.cancel()
+        initRequestJob = null
+        initTerminalTokenBaseline = null
+        if (dispatchOwner != null) {
+            if (clearSending) {
+                releaseCommandDispatch(dispatchOwner)
+            } else {
+                releaseActiveCommandDispatch(clearSending = false)
+            }
+        }
+    }
+
+    private fun executeServerCommand(
+        commandName: String,
+        arguments: String,
+        dispatchOwner: Long,
+        submission: ComposerSubmission?,
+    ) {
+        viewModelScope.launch {
+            try {
+                val request = ExecuteCommandRequest(
+                    command = commandName,
+                    arguments = arguments,
+                )
+                val result = safeApiCall { workspaceClient.executeCommand(sessionId, request) }
+                when (result) {
+                    is ApiResult.Success -> {
+                        val finished = finishCommandDispatch(dispatchOwner) {
+                            it.copy(isSending = false, isBusy = true)
+                        }
+                        if (finished) completeComposerSubmission(submission)
+                    }
+                    is ApiResult.Error -> {
+                        val finished = finishCommandDispatch(dispatchOwner) {
+                            it.copy(isSending = false, error = "Could not execute the command. Try again.")
+                        }
+                        if (finished) failComposerSubmission(submission)
                     }
                 }
+            } finally {
+                releaseCommandDispatch(dispatchOwner)
             }
         }
     }
@@ -690,22 +1506,30 @@ class ChatViewModel constructor(
 
     // --- Revert / Unrevert ---
 
-    private fun undoSessionCommand() {
+    private fun undoSessionCommand(dispatchOwner: Long, submittedDraft: String?): Boolean {
         val targetMessageId = previousUserMessageBoundary()
         if (targetMessageId == null) {
-            _uiState.update { it.copy(error = "Nothing to undo") }
-            return
+            finishCommandDispatch(dispatchOwner) {
+                it.copy(isSending = false, error = "Nothing to undo")
+            }
+            return false
         }
-        revertSessionTo(targetMessageId, "undo")
+        val submission = beginComposerSubmission(submittedDraft)
+        revertSessionTo(targetMessageId, "undo", dispatchOwner, submission)
+        return true
     }
 
-    private fun redoSessionCommand() {
+    private fun redoSessionCommand(dispatchOwner: Long, submittedDraft: String?): Boolean {
         val targetMessageId = nextUserMessageBoundary()
         if (targetMessageId == null) {
-            _uiState.update { it.copy(error = "Nothing to redo") }
-            return
+            finishCommandDispatch(dispatchOwner) {
+                it.copy(isSending = false, error = "Nothing to redo")
+            }
+            return false
         }
-        revertSessionTo(targetMessageId, "redo")
+        val submission = beginComposerSubmission(submittedDraft)
+        revertSessionTo(targetMessageId, "redo", dispatchOwner, submission)
+        return true
     }
 
     private fun previousUserMessageBoundary(): String? {
@@ -729,19 +1553,32 @@ class ChatViewModel constructor(
         return userMessages.indexOfFirst { it.id == activeRevertMessageId }.takeIf { it >= 0 }
     }
 
-    private fun revertSessionTo(messageId: String, action: String) {
+    private fun revertSessionTo(
+        messageId: String,
+        action: String,
+        dispatchOwner: Long,
+        submission: ComposerSubmission?,
+    ) {
         viewModelScope.launch {
-            _uiState.update { it.copy(isSending = true) }
-            val request = RevertSessionRequest(messageID = messageId)
-            val result = safeApiCall { workspaceClient.revertSession(sessionId, request) }
-            when (result) {
-                is ApiResult.Success -> {
-                    _uiState.update { it.copy(isSending = false) }
-                    loadSession()
+            try {
+                val request = RevertSessionRequest(messageID = messageId)
+                val result = safeApiCall { workspaceClient.revertSession(sessionId, request) }
+                when (result) {
+                    is ApiResult.Success -> {
+                        if (finishCommandDispatch(dispatchOwner) { it.copy(isSending = false) }) {
+                            completeComposerSubmission(submission)
+                            loadSession()
+                        }
+                    }
+                    is ApiResult.Error -> {
+                        val finished = finishCommandDispatch(dispatchOwner) {
+                            it.copy(isSending = false, error = "Could not $action. Try again.")
+                        }
+                        if (finished) failComposerSubmission(submission)
+                    }
                 }
-                is ApiResult.Error -> {
-                    _uiState.update { it.copy(isSending = false, error = "Could not $action. Try again.") }
-                }
+            } finally {
+                releaseCommandDispatch(dispatchOwner)
             }
         }
     }
@@ -778,34 +1615,85 @@ class ChatViewModel constructor(
     // --- Abort ---
 
     fun abortSession() {
+        // Abort supersedes any command endpoint. Retire its dispatch owner immediately so a
+        // non-cooperative response cannot publish stale success/error state, but leave the
+        // sending presentation asserted until the abort endpoint itself resolves.
+        invalidateInitOperation(clearSending = false)
+        releaseActiveCommandDispatch(clearSending = false)
+        responseReconciliationJob?.cancel()
+        responseReconciliationJob = null
         viewModelScope.launch {
             when (val result = sessionRepository.abortSession(SessionId(sessionId)).await().toApiResult()) {
                 is ApiResult.Success -> {
+                    suppressStaleRunErrors = false
                     sessionRepository.clearStreamingFlags(SessionId(sessionId))
-                    _uiState.update { it.copy(isBusy = false, isSending = false) }
+                    _uiState.update { it.copy(isBusy = false, isSending = false, runNotice = null) }
                 }
-                is ApiResult.Error -> _uiState.update {
-                    it.copy(error = "Could not stop the run. Try again.")
+                is ApiResult.Error -> {
+                    suppressStaleRunErrors = false
+                    _uiState.update {
+                        it.copy(isSending = false, error = "Could not stop the run. Try again.")
+                    }
                 }
             }
         }
     }
 
     override fun onCleared() {
+        invalidateInitOperation()
+        releaseActiveCommandDispatch(clearSending = true)
+        responseReconciliationJob?.cancel()
+        responseReconciliationJob = null
         sessionLease.close()
         super.onCleared()
     }
 
     private fun dev.blazelight.p4oc.domain.model.MessageError.toHumanMessage(): String = when {
         name == "ProviderAuthError" -> "Provider authentication required"
+        isUsageLimit() -> "Model usage limit reached. Try again later or choose another model."
+        name == "EmptyResponseError" ->
+            "The model returned no response. The provider may be unavailable or rate-limited."
         isRetryable -> "The request failed temporarily. Try again."
         else -> "The run failed. Try again."
     }
 
+    private fun dev.blazelight.p4oc.domain.model.MessageError.isUsageLimit(): Boolean =
+        statusCode == HTTP_TOO_MANY_REQUESTS ||
+            message.containsUsageLimitMarker() ||
+            responseBody.containsUsageLimitMarker()
+
+    private fun SessionStatus.Retry.toHumanMessage(): String =
+        if (message.containsUsageLimitMarker()) {
+            "Model usage limit reached. OpenCode is retrying${attemptLabel()}."
+        } else {
+            "The model request failed temporarily. OpenCode is retrying${attemptLabel()}."
+        }
+
+    private fun SessionStatus.Retry.attemptLabel(): String =
+        if (attempt > 0) " (attempt $attempt)" else ""
+
+    private fun String?.containsUsageLimitMarker(): Boolean {
+        val normalized = this?.lowercase().orEmpty()
+        return "rate limit" in normalized || "rate-limit" in normalized ||
+            "too many requests" in normalized || "status 429" in normalized ||
+            "free usage exceeded" in normalized || "free limit" in normalized
+    }
+
     private fun <T> Result<T>.toApiResult(): ApiResult<T> = fold(
         onSuccess = { ApiResult.Success(it) },
-        onFailure = { ApiResult.Error(message = it.message ?: "Unknown error", throwable = it) }
+        onFailure = { ApiResult.Error(message = it.message ?: "Unknown error", throwable = it) },
     )
+}
+
+private fun mergeCommands(
+    serverCommands: List<Command>,
+    localFallbacks: List<Command>,
+): List<Command> {
+    val serverCommandNames = serverCommands.mapTo(HashSet(serverCommands.size), Command::name)
+    return buildList(serverCommands.size + localFallbacks.size) {
+        addAll(serverCommands)
+        localFallbacks.filterTo(this) { it.name !in serverCommandNames }
+    }
 }
 
 /**
@@ -815,6 +1703,7 @@ class ChatViewModel constructor(
 data class ChatUiState(
     val session: Session? = null,
     val inputText: String = "",
+    val inputSyncGeneration: Long = 0,
     val isLoading: Boolean = false,
     val isLoadingOlderMessages: Boolean = false,
     val hasOlderMessages: Boolean = false,
@@ -823,10 +1712,25 @@ data class ChatUiState(
     val isSending: Boolean = false,
     val isBusy: Boolean = false,
     val error: String? = null,
+    val runNotice: String? = null,
     val commands: List<Command> = emptyList(),
     val isLoadingCommands: Boolean = false,
     val hasLoadedWorkspaceCommands: Boolean = false,
     val commandLoadError: String? = null,
     val todos: List<Todo> = emptyList(),
-    val isLoadingTodos: Boolean = false
+    val isLoadingTodos: Boolean = false,
+)
+
+data class PendingV2FormsUiState(
+    val isLoading: Boolean = false,
+    val error: String? = null,
+    val forms: List<PendingV2FormUi> = emptyList(),
+)
+
+data class PendingV2FormUi(
+    val id: String,
+    val form: V2FormInfo? = null,
+    val isLoading: Boolean = true,
+    val isSubmitting: Boolean = false,
+    val error: String? = null,
 )

@@ -3,6 +3,7 @@ package dev.blazelight.p4oc.core.network
 import dev.blazelight.p4oc.core.datastore.SettingsDataStore
 import dev.blazelight.p4oc.data.remote.mapper.EventMapper
 import dev.blazelight.p4oc.data.remote.mapper.MessageMapper
+import dev.blazelight.p4oc.domain.server.ServerGeneration
 import io.mockk.mockk
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -18,6 +19,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -37,6 +39,19 @@ class ConnectionManagerLoggingTest {
         assertFalse(client.followSslRedirects)
     }
 
+    @Test
+    fun `sse client uses a finite read timeout to detect silent dead sockets`() {
+        val base = manager.buildBaseOkHttpClient(
+            ServerConfig(url = "https://opencode.test", username = "user"),
+            password = "secret",
+        )
+        val sseClient = manager.buildSseOkHttpClient(base)
+
+        // 60s finite read timeout so a half-open SSE socket that stops producing
+        // frames (heartbeats) eventually errors and the library reconnects (issue #14).
+        assertEquals(60_000, sseClient.readTimeoutMillis)
+    }
+
     private val dispatcher = StandardTestDispatcher()
     private val json = Json { ignoreUnknownKeys = true }
     private lateinit var manager: ConnectionManager
@@ -46,8 +61,9 @@ class ConnectionManagerLoggingTest {
         Dispatchers.setMain(dispatcher)
         manager = ConnectionManager(
             json = json,
-            eventMapper = EventMapper(json, MessageMapper(json)),
+            eventMapper = EventMapper(json, MessageMapper()),
             settingsDataStore = mockk<SettingsDataStore>(),
+            generationIssuer = { ServerGeneration(1L) },
         )
     }
 

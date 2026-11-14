@@ -16,6 +16,7 @@ import java.io.InputStream
 interface FileRepository {
     suspend fun listFiles(path: String): FileOperationResult<FileList>
     suspend fun readFile(path: String): FileOperationResult<FileContent>
+    suspend fun searchFiles(query: String): FileOperationResult<List<FileNode>>
     suspend fun searchSymbols(query: String): FileOperationResult<List<Symbol>>
     suspend fun writeFile(request: FileWriteRequest): FileOperationResult<FileWriteResult>
     suspend fun createDirectory(path: String): FileOperationResult<Unit>
@@ -46,6 +47,7 @@ data class FileList(
 data class FileCapabilities(
     val canRead: Boolean = true,
     val canList: Boolean = true,
+    val canSearchSymbols: Boolean = true,
     val canWrite: Boolean = false,
     val canCreateDirectory: Boolean = false,
     val canRename: Boolean = false,
@@ -70,6 +72,7 @@ data class FileUploadRequest(
     val openStream: suspend () -> InputStream,
     val expectedHash: String? = null,
     val onBytesUploaded: (suspend (Long) -> Unit)? = null,
+    val createOnly: Boolean = false,
 )
 
 data class FileUploadResult(
@@ -117,6 +120,16 @@ class WorkspaceFileRepository internal constructor(
         }
     }
 
+    override suspend fun searchFiles(query: String): FileOperationResult<List<FileNode>> {
+        val normalizedQuery = query.trim()
+        if (normalizedQuery.isBlank()) return FileOperationResult.Ok(emptyList())
+
+        return when (val result = safeApiCall { client.searchFiles(normalizedQuery) }) {
+            is ApiResult.Success -> FileOperationResult.Ok(result.data.toFileNodes())
+            is ApiResult.Error -> FileOperationResult.Failed(result.message, result.throwable)
+        }
+    }
+
     override suspend fun searchSymbols(query: String): FileOperationResult<List<Symbol>> {
         val normalizedQuery = query.trim()
         if (normalizedQuery.isBlank()) return FileOperationResult.Ok(emptyList())
@@ -150,7 +163,9 @@ class WorkspaceFileRepository internal constructor(
         return unsupportedMutationResult(request.path)
     }
 
-    override suspend fun capabilities(): FileCapabilities = FileCapabilities()
+    override suspend fun capabilities(): FileCapabilities = FileCapabilities(
+        canSearchSymbols = client.supportsSymbolSearch,
+    )
 
     private fun <T> unsupportedMutationResult(path: String): FileOperationResult<T> {
         FilePathValidator.normalizeForMutation(path).getOrElse { error ->
@@ -177,6 +192,22 @@ class WorkspaceFileRepository internal constructor(
         encoding = encoding,
     )
 
+    private fun List<String>.toFileNodes(): List<FileNode> = buildList(size) {
+        val seenPaths = HashSet<String>(size)
+        for (path in this@toFileNodes) {
+            val normalizedPath = FilePathValidator.normalizeForReadOrList(path).getOrNull()
+            if (normalizedPath.isNullOrEmpty() || !seenPaths.add(normalizedPath)) continue
+
+            add(
+                FileNode(
+                    name = normalizedPath.substringAfterLast('/'),
+                    path = normalizedPath,
+                    type = "file",
+                )
+            )
+        }
+    }
+
     private companion object {
         const val ROOT_API_PATH = "."
         const val INVALID_PATH_MESSAGE = "Invalid file path"
@@ -185,20 +216,25 @@ class WorkspaceFileRepository internal constructor(
 }
 
 internal interface FileWorkspaceClient {
+    val supportsSymbolSearch: Boolean get() = true
     suspend fun listFiles(path: String): List<FileNodeDto>
     suspend fun readFile(path: String): FileContentDto
     suspend fun getFileStatus(): List<FileStatusDto>
+    suspend fun searchFiles(query: String): List<String>
     suspend fun searchSymbols(query: String): List<SymbolDto>
 }
 
 private class WorkspaceClientFileAdapter(
     private val workspaceClient: WorkspaceClient,
 ) : FileWorkspaceClient {
+    override val supportsSymbolSearch: Boolean get() = workspaceClient.supportsSymbolSearch
     override suspend fun listFiles(path: String): List<FileNodeDto> = workspaceClient.listFiles(path)
 
     override suspend fun readFile(path: String): FileContentDto = workspaceClient.readFile(path)
 
     override suspend fun getFileStatus(): List<FileStatusDto> = workspaceClient.getFileStatus()
+
+    override suspend fun searchFiles(query: String): List<String> = workspaceClient.searchFiles(query)
 
     override suspend fun searchSymbols(query: String): List<SymbolDto> = workspaceClient.searchSymbols(query)
 }

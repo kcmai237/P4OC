@@ -5,7 +5,6 @@ import dev.blazelight.p4oc.data.remote.dto.*
 import dev.blazelight.p4oc.domain.model.*
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -100,9 +99,7 @@ private fun JsonObject.intValue(key: String): Int? = (this[key] as? JsonPrimitiv
 private fun JsonObject.booleanValue(key: String): Boolean =
     (this[key] as? JsonPrimitive)?.contentOrNull?.toBooleanStrictOrNull() ?: false
 
-class MessageMapper constructor(
-    private val json: Json
-) {
+class MessageMapper {
     fun mapToDomain(dto: MessageInfoDto): Message = when (dto.role) {
         "user" -> Message.User(
             id = dto.id,
@@ -111,7 +108,7 @@ class MessageMapper constructor(
             agent = dto.agent ?: "",
             model = dto.model?.let { ModelRef(it.providerID, it.modelID) }
                 ?: ModelRef("", ""),
-            summary = mapMessageSummaryToDomain(dto.summary),
+            summary = null,
             system = dto.system,
             tools = dto.tools?.let { jsonObj ->
                 jsonObj.mapValues { (_, v) -> v.toString().toBooleanStrictOrNull() ?: false }
@@ -128,11 +125,11 @@ class MessageMapper constructor(
             mode = dto.mode ?: "",
             agent = dto.agent ?: "",
             cost = dto.cost ?: 0.0,
-            tokens = dto.tokens?.let { mapTokensToDomain(it) } ?: TokenUsage(0, 0),
+            tokens = dto.tokens?.let { mapTokensToDomain(it) } ?: TokenUsage(0L, 0L),
             path = dto.path?.let { MessagePath(it.cwd ?: "", it.root ?: "") },
             error = dto.error?.let { mapMessageErrorToDomain(it) },
             finish = dto.finish,
-            summary = dto.summary?.toString()?.toBooleanStrictOrNull()
+            summary = null
         )
     }
 
@@ -146,8 +143,8 @@ class MessageMapper constructor(
         input = dto.input,
         output = dto.output,
         reasoning = dto.reasoning,
-        cacheRead = dto.cache?.read ?: 0,
-        cacheWrite = dto.cache?.write ?: 0
+        cacheRead = dto.cache?.read ?: 0L,
+        cacheWrite = dto.cache?.write ?: 0L
     )
 
     private fun mapMessageErrorToDomain(dto: MessageErrorDto): MessageError {
@@ -172,29 +169,6 @@ class MessageMapper constructor(
             isRetryable = data.booleanValue("isRetryable"),
             responseBody = data.stringValue("responseBody")
         )
-    }
-
-    private fun mapMessageSummaryToDomain(summary: JsonElement?): MessageSummary? {
-        if (summary == null) return null
-        return try {
-            val obj = summary as? JsonObject ?: return null
-            val summaryDto = json.decodeFromJsonElement<MessageSummaryDto>(obj)
-            MessageSummary(
-                title = summaryDto.title,
-                body = summaryDto.body,
-                diffs = summaryDto.diffs.map { dto ->
-                    FileDiff(
-                        file = dto.file,
-                        before = dto.before,
-                        after = dto.after,
-                        additions = dto.additions,
-                        deletions = dto.deletions
-                    )
-                }
-            )
-        } catch (e: Exception) {
-            null
-        }
     }
 }
 
@@ -347,8 +321,8 @@ object PartMapper {
         input = dto.input,
         output = dto.output,
         reasoning = dto.reasoning,
-        cacheRead = dto.cache?.read ?: 0,
-        cacheWrite = dto.cache?.write ?: 0
+        cacheRead = dto.cache?.read ?: 0L,
+        cacheWrite = dto.cache?.write ?: 0L
     )
 
     private fun mapAgentSourceToDomain(source: JsonObject): AgentPartSource? {
@@ -690,6 +664,11 @@ class EventMapper constructor(
                         MessageError(
                             name = error.name,
                             message = (error.data?.get("message") as? JsonPrimitive)?.contentOrNull,
+                            statusCode = (error.data?.get("statusCode") as? JsonPrimitive)?.intOrNull,
+                            isRetryable = (error.data?.get("isRetryable") as? JsonPrimitive)
+                                ?.contentOrNull
+                                ?.toBooleanStrictOrNull()
+                                ?: false,
                             providerID = (error.data?.get("providerID") as? JsonPrimitive)?.contentOrNull,
                             responseBody = (error.data?.get("responseBody") as? JsonPrimitive)?.contentOrNull,
                         )

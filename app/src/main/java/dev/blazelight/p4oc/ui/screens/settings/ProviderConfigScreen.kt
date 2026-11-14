@@ -32,6 +32,7 @@ import dev.blazelight.p4oc.R
 import dev.blazelight.p4oc.data.remote.dto.ModelDto
 import dev.blazelight.p4oc.data.remote.dto.ProviderAuthMethodDto
 import dev.blazelight.p4oc.data.remote.dto.ProviderDto
+import dev.blazelight.p4oc.ui.components.TuiAlertDialog
 import dev.blazelight.p4oc.ui.components.TuiButton
 import dev.blazelight.p4oc.ui.components.TuiCard
 import dev.blazelight.p4oc.ui.components.TuiLoadingScreen
@@ -60,22 +61,9 @@ fun ProviderConfigScreen(
     var authorizationCode by remember(pendingAuthorization) { mutableStateOf("") }
 
     pendingAuthorization?.let { pending ->
-        AlertDialog(
+        TuiAlertDialog(
             onDismissRequest = viewModel::dismissAuthorization,
-            title = { Text(stringResource(R.string.provider_auth_title)) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(Spacing.sm)) {
-                    Text(pending.authorization.instructions)
-                    if (pending.authorization.method == "code") {
-                        OutlinedTextField(
-                            value = authorizationCode,
-                            onValueChange = { authorizationCode = it },
-                            label = { Text(stringResource(R.string.provider_auth_code)) },
-                            singleLine = true,
-                        )
-                    }
-                }
-            },
+            title = stringResource(R.string.provider_auth_title),
             confirmButton = {
                 TuiButton(
                     onClick = {
@@ -105,7 +93,19 @@ fun ProviderConfigScreen(
                     Text(stringResource(R.string.provider_auth_open_browser))
                 }
             }
-        )
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+                Text(pending.authorization.instructions)
+                if (pending.authorization.method == "code") {
+                    OutlinedTextField(
+                        value = authorizationCode,
+                        onValueChange = { authorizationCode = it },
+                        label = { Text(stringResource(R.string.provider_auth_code)) },
+                        singleLine = true,
+                    )
+                }
+            }
+        }
     }
 
     val theme = LocalOpenCodeTheme.current
@@ -176,6 +176,16 @@ fun ProviderConfigScreen(
                             modifier = Modifier.fillMaxWidth()
                         )
                     }
+                    if (!uiState.canSetDefaultModel) {
+                        item {
+                            Text(
+                                text = stringResource(R.string.v2_model_settings_info),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = theme.textMuted,
+                                modifier = Modifier.padding(vertical = Spacing.sm),
+                            )
+                        }
+                    }
 
                     val connectedProviders = uiState.providers.filter {
                         it.id in uiState.connectedProviderIds
@@ -199,6 +209,7 @@ fun ProviderConfigScreen(
                             provider = provider,
                             isExpanded = uiState.selectedProviderId == provider.id,
                             currentModel = uiState.currentModel,
+                            canSetDefaultModel = uiState.canSetDefaultModel,
                             authMethods = uiState.authMethods[provider.id].orEmpty(),
                             isAuthenticating = uiState.isAuthenticating,
                             onToggle = {
@@ -288,6 +299,7 @@ private fun ProviderCard(
     provider: ProviderDto,
     isExpanded: Boolean,
     currentModel: String?,
+    canSetDefaultModel: Boolean,
     authMethods: List<ProviderAuthMethodDto>,
     isAuthenticating: Boolean,
     onToggle: () -> Unit,
@@ -343,6 +355,7 @@ private fun ProviderCard(
                         ModelItem(
                             model = model,
                             isSelected = currentProviderId == provider.id && currentModelId == model.id,
+                            enabled = canSetDefaultModel,
                             onClick = { onSelectModel(model.id) }
                         )
                     }
@@ -394,10 +407,12 @@ private fun ProviderCardHeader(
     }
 }
 
+@Suppress("FunctionNaming", "LongMethod")
 @Composable
 private fun ModelItem(
     model: ModelDto,
     isSelected: Boolean,
+    enabled: Boolean,
     onClick: () -> Unit
 ) {
     val theme = LocalOpenCodeTheme.current
@@ -413,6 +428,7 @@ private fun ModelItem(
                 shape = RectangleShape
             )
             .selectable(
+                enabled = enabled,
                 selected = isSelected,
                 onClick = onClick,
                 role = Role.RadioButton,
@@ -443,10 +459,18 @@ private fun ModelItem(
             ) {
                 model.capabilities?.let { caps ->
                     if (caps.reasoning) {
-                        CapabilityChip("Reasoning")
+                        Text(
+                            text = "[R]",
+                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                            color = theme.info,
+                        )
                     }
                     if (caps.toolcall) {
-                        CapabilityChip("Tools")
+                        Text(
+                            text = "[T]",
+                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                            color = theme.accent,
+                        )
                     }
                 }
 

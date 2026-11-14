@@ -33,6 +33,7 @@ fun ConnectionSettingsScreen(
     onNavigateBack: () -> Unit
 ) {
     val connectionSettings by viewModel.connectionSettings.collectAsStateWithLifecycle()
+    val dataSaverEnabled by viewModel.dataSaverEnabled.collectAsStateWithLifecycle()
     val theme = LocalOpenCodeTheme.current
 
     Scaffold(
@@ -98,19 +99,23 @@ fun ConnectionSettingsScreen(
                     color = theme.borderSubtle
                 )
             }
+
+            ConnectionSwitch(
+                title = stringResource(R.string.settings_data_saver),
+                subtitle = stringResource(R.string.settings_data_saver_desc),
+                icon = Icons.Default.DataUsage,
+                checked = dataSaverEnabled,
+                onCheckedChange = { viewModel.toggleDataSaver() },
+                enabled = true,
+                testTag = "settings_data_saver"
+            )
         }
     }
 }
 
 @Composable
 private fun SectionHeader(title: String) {
-    val theme = LocalOpenCodeTheme.current
-    Text(
-        text = title,
-        style = MaterialTheme.typography.titleSmall,
-        color = theme.accent,
-        modifier = Modifier.padding(horizontal = Spacing.lg, vertical = Spacing.md)
-    )
+    dev.blazelight.p4oc.ui.components.TuiSectionHeader(title)
 }
 
 @Composable

@@ -4,6 +4,7 @@ import com.launchdarkly.eventsource.ConnectStrategy
 import com.launchdarkly.eventsource.ErrorStrategy
 import com.launchdarkly.eventsource.EventSource
 import com.launchdarkly.eventsource.MessageEvent
+import com.launchdarkly.eventsource.RetryDelayStrategy
 import com.launchdarkly.eventsource.background.BackgroundEventHandler
 import com.launchdarkly.eventsource.background.BackgroundEventSource
 import com.launchdarkly.eventsource.background.ConnectionErrorHandler
@@ -14,8 +15,10 @@ import dev.blazelight.p4oc.data.remote.mapper.EventMapper
 import dev.blazelight.p4oc.domain.model.OpenCodeEvent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -23,6 +26,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
@@ -30,11 +34,14 @@ import java.net.URI
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
-class OpenCodeEventSource(
+class OpenCodeEventSource internal constructor(
     private val okHttpClient: OkHttpClient,
     private val json: Json,
     private val baseUrl: String,
     private val eventMapper: EventMapper,
+    private val useV2: Boolean = false,
+    private val backoffEnabled: Boolean = false,
+    private val backoff: ReconnectBackoff = ReconnectBackoff(),
 ) {
     data class DirectoryEvent(
         val directory: String?,
@@ -45,6 +52,14 @@ class OpenCodeEventSource(
         private const val TAG = "OpenCodeEventSource"
         private const val MAX_CONSECUTIVE_ERRORS = 15
         internal const val MAX_EVENT_DATA_CHARS = 4 * 1024 * 1024
+
+        // Library retry strategy applied only when the O3 flag is on. The library already
+        // backoffs in-stream retries; O3 raises the cap to 60s, keeps multiplier 2 and adds
+        // 0.3 jitter, with a 60s stable-connection reset threshold.
+        private const val SSE_RETRY_BASE_SECONDS = 3L
+        private const val SSE_RETRY_MAX_SECONDS = 60L
+        private const val SSE_RETRY_JITTER_MULTIPLIER = 0.3f
+        private const val SSE_RETRY_RESET_SECONDS = 60L
     }
 
     private val eventPumpScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -59,10 +74,18 @@ class OpenCodeEventSource(
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
+    // Monotonic reconnect counter. Increments on every active-generation onOpen, before
+    // Connected is published. It is the authoritative reconnect signal: rapid or conflated
+    // Connecting->Connected transitions that a StateFlow<ConnectionState> may coalesce
+    // remain individually observable here, and downstream owners can key recovery off it.
+    private val _connectionEpoch = MutableStateFlow(0L)
+    val connectionEpoch: StateFlow<Long> = _connectionEpoch.asStateFlow()
+
     // Lifecycle lock — guards backgroundEventSource reference only.
     // close() is called OUTSIDE the lock to avoid blocking other callers (~2s executor shutdown).
     private val lock = Any()
     private var backgroundEventSource: BackgroundEventSource? = null
+    private var pendingReconnectStart: Job? = null
 
     // Generation counter for stale-callback protection.
     // Volatile because it is written under lock but read from library threads without lock.
@@ -73,6 +96,7 @@ class OpenCodeEventSource(
     private var isShutdown = false
 
     private val consecutiveErrors = AtomicInteger(0)
+    private val v2EventMapper = V2EventMapper(json, eventMapper)
 
     init {
         eventPumpScope.launch {
@@ -122,7 +146,7 @@ class OpenCodeEventSource(
     fun reconnect() {
         AppLog.d(TAG, "reconnect() called")
         val toClose: BackgroundEventSource?
-        val besRef: BackgroundEventSource
+        var immediate: BackgroundEventSource? = null
         synchronized(lock) {
             if (isShutdown) {
                 AppLog.w(TAG, "reconnect() called after shutdown – ignoring")
@@ -133,16 +157,34 @@ class OpenCodeEventSource(
             consecutiveErrors.set(0)
 
             val gen = ++generation
-            besRef = createBackgroundEventSource(gen)
-            backgroundEventSource = besRef
+            if (backoffEnabled) {
+                val delayMillis = backoff.nextDelayMillis()
+                AppLog.d(TAG, "reconnect() delayed by ${delayMillis}ms (attempt ${backoff.attempts})")
+                pendingReconnectStart = eventPumpScope.launch {
+                    delay(delayMillis)
+                    val scheduled = synchronized(lock) {
+                        if (isShutdown || generation != gen) {
+                            null
+                        } else {
+                            pendingReconnectStart = null
+                            createBackgroundEventSource(gen).also { backgroundEventSource = it }
+                        }
+                    }
+                    scheduled?.start()
+                }
+            } else {
+                immediate = createBackgroundEventSource(gen)
+                backgroundEventSource = immediate
+            }
         }
         toClose?.closeSafely()
-        besRef.start()
+        immediate?.start()
     }
 
     /** Reset error counter — call on foreground resume before reconnect. */
     fun resetConsecutiveErrors() {
         consecutiveErrors.set(0)
+        backoff.reset()
     }
 
     fun shutdown() {
@@ -163,6 +205,8 @@ class OpenCodeEventSource(
      * Must be called while holding [lock]. The returned BES should be closed OUTSIDE the lock.
      */
     private fun detachLocked(): BackgroundEventSource? {
+        pendingReconnectStart?.cancel()
+        pendingReconnectStart = null
         val bes = backgroundEventSource
         backgroundEventSource = null
         // Increment generation so any pending callbacks from bes are ignored
@@ -180,16 +224,29 @@ class OpenCodeEventSource(
     }
 
     private fun createBackgroundEventSource(gen: Long): BackgroundEventSource {
-        val eventUrl = "$baseUrl/global/event"
+        // V2 /api/event is live-only: events during a disconnect are missed. Each successful
+        // onOpen advances the connection epoch so repositories can recover through REST.
+        val eventUrl = if (useV2) "$baseUrl/api/event" else "$baseUrl/global/event"
         AppLog.d(TAG, "Creating SSE event source")
 
         val connectStrategy = ConnectStrategy.http(URI(eventUrl))
             .httpClient(okHttpClient)
-            .readTimeout(0, TimeUnit.SECONDS)
 
         val eventSourceBuilder = EventSource.Builder(connectStrategy)
             .errorStrategy(ErrorStrategy.alwaysContinue())
-            .retryDelay(3, TimeUnit.SECONDS)
+        if (backoffEnabled) {
+            eventSourceBuilder
+                .retryDelay(SSE_RETRY_BASE_SECONDS, TimeUnit.SECONDS)
+                .retryDelayStrategy(
+                    RetryDelayStrategy.defaultStrategy()
+                        .maxDelay(SSE_RETRY_MAX_SECONDS, TimeUnit.SECONDS)
+                        .backoffMultiplier(2f)
+                        .jitterMultiplier(SSE_RETRY_JITTER_MULTIPLIER),
+                )
+                .retryDelayResetThreshold(SSE_RETRY_RESET_SECONDS, TimeUnit.SECONDS)
+        } else {
+            eventSourceBuilder.retryDelay(SSE_RETRY_BASE_SECONDS, TimeUnit.SECONDS)
+        }
 
         val handler = SseEventHandler(gen)
 
@@ -222,10 +279,19 @@ class OpenCodeEventSource(
         !isShutdown && generation == gen
 
     private fun parseAndEmitEvent(data: String, gen: Long) {
-        if (data.length > MAX_EVENT_DATA_CHARS) {
-            rejectOversizedEvent(data.length, gen)
-            return
+        when {
+            data.length > MAX_EVENT_DATA_CHARS -> rejectOversizedEvent(data.length, gen)
+            useV2 -> {
+                v2EventMapper.map(data)?.let { mapped ->
+                    enqueueMappedEvent(mapped.event, mapped.directory, gen)
+                    AppLog.d(TAG, "V2 event queued: ${mapped.event::class.simpleName}")
+                }
+            }
+            else -> parseV1Event(data, gen)
         }
+    }
+
+    private fun parseV1Event(data: String, gen: Long) {
         try {
             val globalEvent = json.decodeFromString<GlobalEventDto>(data)
             val event = eventMapper.mapToEvent(globalEvent.payload)
@@ -302,6 +368,10 @@ class OpenCodeEventSource(
             AppLog.d(TAG, "SSE connected (onOpen)")
             errorFiredSinceOpen = false
             consecutiveErrors.set(0)
+            backoff.reset()
+            // Bump the reconnect epoch before publishing Connected so every successful
+            // (re)connection is observable even if the state transition is coalesced.
+            _connectionEpoch.update { it + 1 }
             _connectionState.value = ConnectionState.Connected
             enqueueEvent(OpenCodeEvent.Connected, gen)
         }

@@ -18,9 +18,20 @@
     <string name="server_update_available">OpenCode server %1$s is available</string>
     <string name="server_updated">OpenCode server updated to %1$s</string>
     <string name="home_title">Home</string>
-    <string name="home_search_accessibility">Search every server, session, or workspace</string>
+    <string name="home_search_accessibility">Search sessions and workspaces</string>
     <string name="home_summary_counts">%1$d sessions · %2$d workspaces</string>
     <string name="home_shared_badge">◈ Shared</string>
+    <string name="home_workspaces_add">+ add</string>
+    <string name="home_workspaces_add_description">Add workspace</string>
+    <string name="home_workspaces_empty_add">Add a project folder, or use + to start something new.</string>
+    <string name="home_workspace_automatic_name">Automatic name: %1$s</string>
+    <string name="home_workspace_user_root">Workspace you added · includes sessions in subfolders</string>
+    <string name="home_workspace_detail_more">Workspace actions</string>
+    <string name="home_workspace_path_copied">Path copied</string>
+    <string name="home_workspace_save_failed">Couldn\'t save workspace changes.</string>
+    <string name="home_workspace_alias_limit">This server already has 256 custom names. Reset one first.</string>
+    <string name="start_work_add_workspace">+ Add workspace…</string>
+    <string name="start_work_add_workspace_description">Add workspace on %1$s</string>
     
     <!-- Server Screen -->
     <string name="server_connect_title">Connect to Server</string>
@@ -31,6 +42,7 @@
     <string name="server_local_description">Run OpenCode directly on your device using Termux.</string>
     <string name="server_remote_title">Network Server</string>
     <string name="server_remote_description">Connect to an OpenCode server running on your network.</string>
+    <string name="server_connect_hint">connect to a running opencode server</string>
     <string name="server_recent_servers">Recent Servers</string>
     <string name="server_saved_servers">Your servers</string>
     <string name="server_saved_servers_desc">Tap a server to connect. More actions are available from its menu.</string>
@@ -41,7 +53,6 @@
     <string name="server_credentials">Credentials and security</string>
     <string name="server_tls_checks_on">TLS checks on</string>
     <string name="server_tls_checks_off">TLS checks off</string>
-    <string name="server_cleartext_credentials_warning">Warning: HTTP sends credentials without transport encryption. This is allowed only for a trusted loopback or private LAN IP.</string>
     <string name="server_auth_configured">Authentication configured</string>
     <string name="server_auth_default">Default authentication</string>
     <string name="server_actions">Server actions</string>
@@ -80,13 +91,16 @@
     <string name="server_setup_step1_title">Install OpenCode</string>
     <string name="server_setup_step1_cmd">$ npm install -g opencode</string>
     <string name="server_setup_step2_title">Start the server</string>
-    <string name="server_setup_step2_cmd">$ OPENCODE_SERVER_PASSWORD=&lt;password&gt; \\\n  opencode serve \\\n  --hostname 0.0.0.0 --port 4096</string>
+    <string name="server_setup_step2_cmd">$ opencode serve --hostname 0.0.0.0 --port 4096\n\nOptional authentication:\n$ OPENCODE_SERVER_PASSWORD=&lt;password&gt; opencode serve --hostname 0.0.0.0 --port 4096</string>
     <string name="server_setup_step3_title">Connect from this device</string>
-    <string name="server_setup_step3_cmd">Enter http://&lt;your-pc-ip&gt;:4096\nin the URL field above.\nUsername: opencode\nPassword: &lt;your password&gt;</string>
+    <string name="server_setup_step3_cmd">Enter http://&lt;your-pc-ip&gt;:4096\nin the URL field above.\nUsername defaults to opencode.\nPassword is optional.</string>
     <string name="server_setup_tip_label">Tip</string>
-    <string name="server_setup_tip_text">--hostname 0.0.0.0 is required so the server is reachable from your phone, not just localhost. Use your computer\'s local IP (e.g., 192.168.x.x) when connecting.</string>
-    <string name="server_setup_find_ip">$ ip addr    # Linux\n$ ifconfig   # macOS\n$ ipconfig   # Windows</string>
-    <string name="server_setup_test_hint">Test from your phone browser:\nhttp://&lt;your-ip&gt;:4096/global/health</string>
+    <string name="server_setup_tip_text">--hostname 0.0.0.0 is required so the server is reachable from your phone, not just localhost. Use your computer\'s local IP (e.g. 192.168.x.x).</string>
+    <!-- Substring of server_setup_tip_text highlighted in the accent colour; keep the two in sync. -->
+    <string name="server_setup_tip_flag" translatable="false">--hostname 0.0.0.0</string>
+    <string name="server_setup_find_ip" translatable="false">$ ip addr    # Linux\n$ ifconfig   # macOS\n$ ipconfig   # Windows</string>
+    <string name="server_setup_test_label">Test from your phone browser:</string>
+    <string name="server_setup_test_url" translatable="false">http://&lt;your-ip&gt;:4096/global/health</string>
     
     <!-- Termux Setup -->
     <string name="termux_step1_title">Step 1: Install Termux</string>
@@ -125,9 +139,36 @@
     <string name="field_hide_password">Hide password</string>
     <string name="field_allow_insecure">Allow self-signed certificate</string>
     <string name="field_allow_insecure_desc">Skip TLS verification (use only on trusted networks)</string>
-    
+
+    <!-- First-run setup (design 01) -->
+    <string name="setup_brand_title">P4OC</string>
+    <string name="setup_brand_tagline">Pocket for OpenCode</string>
+    <string name="setup_server_url_label">SERVER URL</string>
+    <string name="setup_field_required">· required</string>
+    <string name="setup_field_optional">· optional</string>
+    <string name="setup_field_default_opencode">· default opencode</string>
+    <string name="setup_username_label">USERNAME</string>
+    <string name="setup_password_label">PASSWORD</string>
+    <string name="setup_password_show">show</string>
+    <string name="setup_password_hide">hide</string>
+    <string name="setup_tls_label">TLS</string>
+    <string name="setup_tls_skip_verification">skip TLS verification</string>
+    <string name="setup_tls_warning">The certificate is not verified. Use only on a network you trust.</string>
+    <string name="setup_credentials_hint">%1$s · password set</string>
+    <string name="setup_credentials_hint_no_password">%1$s · no password</string>
+    <string name="setup_scanning_nearby">scanning nearby servers</string>
+    <string name="setup_retry">retry</string>
+    <string name="server_use">use</string>
+
     <!-- Settings Screen -->
     <string name="settings_title">Settings</string>
+    <string name="settings_group_server">Server · %1$s</string>
+    <string name="notification_routing_section">Routing · per server</string>
+    <string name="notification_routing_all">All</string>
+    <string name="notification_routing_mentions">Mentions</string>
+    <string name="notification_routing_off">Off</string>
+    <string name="notification_routing_empty">Add a server to route its notifications.</string>
+    <string name="settings_group_app">App</string>
     <string name="settings_providers">Providers</string>
     <string name="settings_providers_desc">Connect and authenticate AI providers</string>
     <string name="settings_model_controls">Model Controls</string>
@@ -207,9 +248,14 @@
     <string name="sessions_search_status_current">Current</string>
     <string name="sessions_search_status_failed">Failed</string>
     <string name="sessions_loading">Loading sessions</string>
+    <string name="sessions_load_more">Load more sessions</string>
     <string name="sessions_new">New Session</string>
     <string name="sessions_delete">Delete</string>
     <string name="sessions_rename">Rename</string>
+    <string name="sessions_open_actions">Open session actions</string>
+    <string name="sessions_fork">Fork session</string>
+    <string name="sessions_forking">Forking session</string>
+    <string name="sessions_fork_already_pending">Another session fork is already starting</string>
     <string name="sessions_rename_title">Rename Session</string>
     <string name="sessions_rename_failed">Failed to rename session</string>
     <string name="sessions_share">Share</string>
@@ -245,7 +291,7 @@
     <string name="chat_empty_title">Start a conversation</string>
     <string name="chat_empty_description">Type a message below to begin</string>
     <string name="chat_load_older_messages">Load older messages</string>
-    <string name="chat_input_placeholder">Type a message…</string>
+    <string name="chat_input_placeholder">Message OpenCode…</string>
     <string name="chat_input_placeholder_with_commands">Type a message or / for commands…</string>
     <string name="chat_send">Send</string>
     <string name="chat_action_send">Send</string>
@@ -254,6 +300,8 @@
     <string name="chat_action_remove_attachment">Remove file %1$s</string>
     <string name="chat_disabled_disconnected">Disconnected</string>
     <string name="chat_disabled_empty">Message is empty</string>
+    <string name="chat_disabled_uploads_pending">Uploads need attention</string>
+    <string name="chat_user_label">you</string>
     <string name="chat_queued_prefix">queued</string>
     <string name="vcs_branch_prefix">◈</string>
     <string name="slash_command_compact_desc">Compact the conversation to reduce context size</string>
@@ -303,12 +351,19 @@
     <string name="context_input">Input</string>
     <string name="context_output">Output</string>
     <string name="context_cached">Cached</string>
+    <string name="context_usage_meter">%1$s %2$d%%</string>
+    <string name="context_usage_percent">Context usage %1$d percent</string>
     
     <!-- Expanded Widgets -->
     <string name="open_sub_agent">Open Sub-Agent</string>
     
     <!-- File Explorer Screen -->
-    <string name="files_search_placeholder">Search files…</string>
+    <string name="files_search_placeholder">Search workspace files…</string>
+    <string name="files_search_blank_hint">Search filenames across this workspace.</string>
+    <string name="files_search_loading">Searching workspace…</string>
+    <string name="files_search_failed">Could not search workspace files. Check the connection and try again.</string>
+    <string name="files_search_no_results">No files found in this workspace.</string>
+    <string name="files_search_result_description">%1$s, file in %2$s</string>
     <string name="files_workspace_global">Global workspace</string>
     <string name="files_breadcrumb_root">Workspace root</string>
     <string name="files_copy_path">Copy Path</string>
@@ -317,7 +372,7 @@
     <string name="files_type_folder">Folder</string>
     <string name="files_item_description">%1$s, %2$s, path %3$s</string>
     <string name="files_item_description_git">%1$s, %2$s, path %3$s, Git status %4$s</string>
-    <string name="files_no_matching_files">-- no matching files --</string>
+
     <string name="files_empty_folder">-- empty folder --</string>
     <string name="files_symbol_search_failed">Could not search symbols. Check the connection and try again.</string>
     <string name="files_restored_path_unavailable">Restored path is unavailable; showing workspace root.</string>
@@ -334,7 +389,56 @@
     <string name="files_delete_confirm">Delete %1$s from this workspace? This cannot be undone.</string>
     <string name="files_operation_failed">File operation failed</string>
     <string name="files_operation_failed_hint">The file operation could not be completed. Check the connection and try again.</string>
-    
+    <string name="files_changes_action">View workspace changes</string>
+    <string name="files_changes_title">Changes</string>
+    <string name="files_changes_exit">Exit Changes</string>
+    <string name="files_changes_refresh">Refresh Changes</string>
+    <string name="files_changes_loading">Loading workspace changes…</string>
+    <string name="files_changes_refreshing">Refreshing workspace changes…</string>
+    <string name="files_changes_refresh_failed">Could not refresh. Showing the previously loaded changes.</string>
+    <string name="files_changes_refresh_unsupported">This server no longer provides workspace changes. Showing the previously loaded changes.</string>
+    <string name="files_changes_refresh_too_large">The refreshed change set is too large to display. Showing the previously loaded changes.</string>
+    <string name="files_changes_refresh_malformed">The refreshed changes data could not be read. Showing the previously loaded changes.</string>
+    <string name="files_changes_refresh_stale">The workspace changed before refresh completed. Showing the previously loaded changes.</string>
+    <string name="files_changes_refresh_authorization_failed">Access to workspace changes was denied. Showing the previously loaded changes.</string>
+    <string name="files_changes_refresh_http_failed">The server could not refresh workspace changes. Showing the previously loaded changes.</string>
+    <string name="files_changes_refresh_network_failed">Could not reach the server to refresh workspace changes. Showing the previously loaded changes.</string>
+    <string name="files_changes_global_workspace">Global workspace</string>
+    <string name="files_changes_target_identity">%1$s · %2$s</string>
+    <string name="files_changes_branch_identity">Branch: %1$s · Default: %2$s</string>
+    <string name="files_changes_branch_unavailable">Unavailable</string>
+    <string name="files_changes_summary">Changed files: %1$d · +%2$d −%3$d</string>
+    <string name="files_changes_empty">Workspace is clean</string>
+    <string name="files_changes_empty_hint">There are no uncommitted workspace changes.</string>
+    <string name="files_changes_status_added">Added</string>
+    <string name="files_changes_status_modified">Modified</string>
+    <string name="files_changes_status_deleted">Deleted</string>
+    <string name="files_changes_row_stats">+%1$d −%2$d</string>
+    <string name="files_changes_row_description">%1$s, %2$s, %3$d additions, %4$d deletions</string>
+    <string name="files_changes_expand_patch">Expand patch for %1$s</string>
+    <string name="files_changes_collapse_patch">Collapse patch for %1$s</string>
+    <string name="files_changes_state_expanded">Expanded</string>
+    <string name="files_changes_state_collapsed">Collapsed</string>
+    <string name="files_changes_patch_heading">Patch for %1$s</string>
+    <string name="files_changes_patch_loading">Loading patch…</string>
+    <string name="files_changes_patch_unsupported">Patch preview is not supported by this server version.</string>
+    <string name="files_changes_patch_unavailable">Patch unavailable for this change.</string>
+    <string name="files_changes_patch_too_large">Patch too large to display.</string>
+    <string name="files_changes_patch_malformed">The server returned patch data the app could not read.</string>
+    <string name="files_changes_patch_stale">This patch is no longer available. Refresh Changes and try again.</string>
+    <string name="files_changes_patch_authorization_failed">You are not authorized to view this patch. Check access and try again.</string>
+    <string name="files_changes_patch_http_failed">The server could not load this patch. Try again.</string>
+    <string name="files_changes_patch_network_failed">Could not reach the server to load this patch. Check the connection and try again.</string>
+    <string name="files_changes_patch_failed">Something went wrong while loading this patch. Try again.</string>
+    <string name="files_changes_unsupported">Workspace changes are not available on this server version.</string>
+    <string name="files_changes_too_large">This workspace change set is too large to display.</string>
+    <string name="files_changes_malformed">The server returned changes data the app could not read.</string>
+    <string name="files_changes_stale">This workspace is no longer current. Refresh Changes and try again.</string>
+    <string name="files_changes_authorization_failed">You are not authorized to view workspace changes. Check access and try again.</string>
+    <string name="files_changes_http_failed">The server could not complete the workspace changes request. Try again.</string>
+    <string name="files_changes_network_failed">Could not reach the server to load workspace changes. Check the connection and try again.</string>
+    <string name="files_changes_failed">Something went wrong while loading workspace changes. Try again.</string>
+
     <!-- Git Screen -->
     <string name="git_title">Git</string>
     <string name="git_title_with_project">%s - Git</string>
@@ -410,6 +514,9 @@
     <string name="visual_settings_shows_full_output">Shows full output/diffs</string>
     <string name="visual_settings_message_font_size">Message Font Size</string>
     <string name="visual_settings_code_font_size">Code Block Font Size</string>
+    <string name="visual_settings_terminal_font_size">Terminal Font Size</string>
+    <string name="visual_settings_interface">Interface</string>
+    <string name="visual_settings_interface_scale">Interface Scale</string>
     <string name="visual_settings_show_line_numbers">Show Line Numbers</string>
     <string name="visual_settings_show_line_numbers_desc">Display line numbers in code blocks</string>
     <string name="visual_settings_word_wrap">Word Wrap</string>
@@ -472,6 +579,7 @@
     <string name="provider_disconnected">Disconnected Providers</string>
     <string name="provider_current_model">Current Model</string>
     <string name="provider_not_configured">Not configured</string>
+    <string name="v2_model_settings_info">OpenCode v2 manages provider credentials and default models on the server. Select a model in a chat to use it for that session.</string>
     <string name="provider_requires_api_key">Requires API key</string>
     <string name="provider_auth_title">Authenticate provider</string>
     <string name="provider_auth_open_browser">Open browser</string>
@@ -486,6 +594,7 @@
     <string name="models_context_format">Context: %s</string>
     <string name="models_tools">Tools</string>
     <string name="models_reasoning">Reasoning</string>
+    <string name="reasoning_with_title">Reasoning · %1$s</string>
     <string name="models_load_failed_title">Could not load models</string>
     <string name="models_load_failed_description">Check the server connection, then try again.</string>
     <string name="models_empty_title">No models available</string>
@@ -573,6 +682,40 @@
     <string name="other_custom_answer">Other (provide custom answer)</string>
     <string name="question_x_of_y">Question %1$d of %2$d</string>
     
+    <!-- OpenCode v2 Form Components -->
+    <string name="v2_form_pending">Form response required</string>
+    <string name="v2_form_loading">Loading form…</string>
+    <string name="v2_form_checking_pending">Checking for pending forms…</string>
+    <string name="v2_form_refresh">Refresh</string>
+    <string name="v2_form_reject">Reject</string>
+    <string name="v2_form_external_open">Open link</string>
+    <string name="v2_form_external_error">Could not open this link on this device.</string>
+    <string name="v2_form_yes">Yes</string>
+    <string name="v2_form_no">No</string>
+    <string name="v2_form_add_custom">Add</string>
+    <string name="v2_form_custom_value">Custom value</string>
+    <string name="v2_form_required_error">This field is required.</string>
+    <string name="v2_form_min_length_error">Use at least %1$d characters.</string>
+    <string name="v2_form_max_length_error">Use no more than %1$d characters.</string>
+    <string name="v2_form_number_error">Enter a valid number.</string>
+    <string name="v2_form_integer_error">Enter a whole number.</string>
+    <string name="v2_form_minimum_error">Enter a value of at least %1$s.</string>
+    <string name="v2_form_maximum_error">Enter a value no greater than %1$s.</string>
+    <string name="v2_form_email_error">Enter a valid email address.</string>
+    <string name="v2_form_uri_error">Enter a valid absolute URI.</string>
+    <string name="v2_form_date_error">Enter a valid date.</string>
+    <string name="v2_form_datetime_error">Enter a valid date and time.</string>
+    <string name="v2_form_pattern_error">This value does not match the required format.</string>
+    <string name="v2_form_invalid_pattern">This field has an invalid validation rule. Refresh the form or reject it.</string>
+    <string name="v2_form_min_items_error">Select at least %1$d options.</string>
+    <string name="v2_form_max_items_error">Select no more than %1$d options.</string>
+    <string name="v2_form_unsupported_field">This form has a field type this app cannot answer. You can reject the form.</string>
+    <string name="v2_form_missing_choices">This required selection field has no available choices.</string>
+    <string name="v2_form_remove_custom">Remove</string>
+    <string name="v2_form_choose_option">Choose one of the available options.</string>
+    <string name="v2_form_external_ack">I\'ve completed this step</string>
+    <string name="v2_form_external_ack_error">Open the link, finish the step there, then confirm it here.</string>
+    <string name="v2_form_hidden_field_error">The automatic value for %1$s is missing or invalid, so this form can\'t be submitted. You can reject it.</string>
     <!-- Command Palette -->
     <string name="command_palette">Command Palette</string>
     <string name="search_commands">Search commands…</string>
@@ -649,6 +792,7 @@
     <string name="cd_show_branches">Show branches</string>
     <string name="cd_fork_conversation">Fork conversation from here</string>
     <string name="cd_delete_branch">Delete branch</string>
+    <string name="cd_jump_to_previous_user_message">Previous user message</string>
     <string name="cd_jump_to_bottom">Jump to bottom</string>
     <string name="cd_add_more_files">Add more files</string>
     <string name="cd_attach_files">Attach files</string>
@@ -714,6 +858,16 @@
     <string name="todo_status_unknown">unknown</string>
     <string name="no_active_todos">No active todos</string>
     <string name="agent_no_tasks">The agent hasn\'t created any tasks yet</string>
+    <string name="todo_list_unavailable">Todo list could not be read</string>
+    <string name="todo_tool_failed">Todo tool failed</string>
+
+    <!-- Apply patch tool widget -->
+    <string name="patch_tool_failed">Patch tool failed</string>
+    <string name="patch_details_unreadable">Patch details could not be read</string>
+    <string name="patch_action_add">Add file</string>
+    <string name="patch_action_update">Update file</string>
+    <string name="patch_action_move">Move file</string>
+    <string name="patch_action_delete">Delete file</string>
     
     <!-- Context Usage Display -->
     <string name="context_usage">Context Usage</string>
@@ -831,6 +985,8 @@
     <string name="connection_section_general">General</string>
     <string name="settings_auto_reconnect">Auto-reconnect</string>
     <string name="settings_auto_reconnect_desc">Automatically reconnect when connection drops</string>
+    <string name="settings_data_saver">Data saver</string>
+    <string name="settings_data_saver_desc">On metered networks: delays non-essential automatic project and session refreshes. Live chat, messages, terminal, and file transfers are never affected.</string>
     <string name="settings_reconnect_timeout">Reconnect timeout</string>
 
     <!-- Notification permissions -->
@@ -879,6 +1035,7 @@
     <string name="cd_upload_files">Upload files here</string>
     <string name="upload_sheet_title">[ Uploading files ]</string>
     <string name="upload_sheet_done_title">[ Upload complete ]</string>
+    <string name="upload_sheet_failed_title">[ Upload needs attention ]</string>
     <string name="upload_sheet_progress">Uploading %1$d of %2$d: %3$s — %4$s / %5$s</string>
     <string name="upload_sheet_summary">%1$d uploaded · %2$d failed</string>
     <!-- File language labels -->
@@ -895,7 +1052,7 @@
     <string name="file_language_plain_text">plain text</string>
 
     <string name="upload_sheet_cancel">Cancel</string>
-    <string name="upload_sheet_dismiss">Dismiss</string>
+    <string name="upload_sheet_dismiss">Done</string>
     <string name="upload_sheet_retry_failed">Retry failed</string>
     <string name="upload_phase_pending">pending</string>
     <string name="upload_phase_reading">reading</string>
@@ -904,21 +1061,124 @@
     <string name="upload_phase_failed">failed</string>
     <string name="upload_probe_failed_for">%1$s · could not read source</string>
     <string name="attachment_unavailable">unavailable</string>
+    <string name="chat_attachment_unnamed">Attachment</string>
+    <string name="chat_attachment_unknown_mime">unknown type</string>
+    <string name="chat_attachment_loading">Loading image %1$s</string>
+    <string name="chat_attachment_image_unavailable">Image preview unavailable</string>
+    <string name="chat_attachment_image_description">Image attachment: %1$s</string>
+    <string name="chat_attachment_open_image">Open full-screen image: %1$s</string>
+    <string name="chat_attachment_close_preview">Close image preview</string>
+    <string name="chat_attachment_workspace_changed_title">Workspace changed</string>
+    <string name="chat_attachment_workspace_changed_message">No files were uploaded. Open the intended chat and choose the files again.</string>
+    <!-- Attachment source sheet and phone upload review -->
+    <string name="attach_sheet_title">[ Attach ]</string>
+    <string name="attach_sheet_privacy_note">Nothing is sent to the agent until you send.</string>
+    <string name="attach_source_photos">Photos</string>
+    <string name="attach_source_phone_files">Files from phone</string>
+    <string name="attach_source_workspace">Workspace files</string>
+    <string name="attach_review_title">[ Review upload ]</string>
+    <string name="attach_review_no_files">No files selected.</string>
+    <string name="attach_review_limits">Max 1 GiB per file. Existing files won’t be replaced. Uploading saves files to this workspace; Send shares them with the agent.</string>
+    <string name="attach_review_destination">Upload to</string>
+    <string name="attach_review_change_folder">Change folder</string>
+    <string name="attach_review_workspace_required">Open a project workspace before uploading files.</string>
+    <string name="attach_review_upload_action">Upload &amp; attach</string>
+    <plurals name="upload_sheet_success_summary">
+        <item quantity="one">%d file uploaded</item>
+        <item quantity="other">%d files uploaded</item>
+    </plurals>
+    <plurals name="attach_review_file_count">
+        <item quantity="one">%d file</item>
+        <item quantity="other">%d files</item>
+    </plurals>
+    <!-- Composer draft attachment rail -->
+    <string name="attachment_detail_title">[ Attachment ]</string>
+    <string name="attachment_detail_name">Name</string>
+    <string name="attachment_detail_path">Path</string>
+    <string name="attachment_detail_type">Type</string>
+    <string name="attachment_detail_size">Size</string>
+    <string name="attachment_detail_status">Status</string>
+    <string name="attachment_detail_remove_note">Removing an attachment does not delete its workspace file.</string>
+    <string name="attachment_detail_unavailable">Unavailable</string>
+    <string name="attachment_detail_attached">Attached</string>
+    <string name="attachment_detail_unknown_type">Unknown type</string>
+    <string name="attachment_detail_unknown_size">Unknown</string>
+    <string name="cd_remove_draft_attachment">Remove %1$s from draft</string>
+    <string name="chat_attachment_loading_preview">Loading image preview</string>
+    <string name="chat_attachment_no_preview">No preview</string>
+    <string name="chat_upload_active_review">Uploading files · Review</string>
+    <string name="chat_upload_attention_review">Uploads need attention · Review</string>
+    <string name="picker_upload_folder_title">[ Upload folder ]</string>
+    <string name="picker_use_folder">[Use folder]</string>
+    <string name="picker_server_workspace">Server workspace</string>
+    <string name="upload_sheet_preparing">Preparing files…</string>
+    <string name="upload_sheet_remove_failed">Remove failed</string>
+    <string name="upload_sheet_draft_context">Removing failed uploads won’t delete workspace files.</string>
+    <!-- Mirrors OfishMutationClient.UPLOAD_TOO_LARGE_MESSAGE for the pre-upload review row. -->
+    <string name="upload_too_large_message">File is too large to upload (maximum 1 GiB)</string>
+    <string name="attach_review_unreadable_file">Cannot read this file. Remove it and choose it again.</string>
     <string name="start_work_title">Start work</string>
     <string name="start_work_in">In</string>
     <string name="start_work_change">Change</string>
     <string name="start_work_choose_context">Choose a server and workspace</string>
+    <string name="start_work_picker_title">Choose a workspace</string>
+    <string name="start_work_picker_subtitle">server · project</string>
+    <string name="start_work_workspace_count_one">1 workspace</string>
+    <string name="start_work_workspace_count_other">%1$d workspaces</string>
+    <string name="start_work_show_more">+ %1$d more</string>
     <string name="start_work_filter_workspaces">Filter workspaces…</string>
     <string name="start_work_no_matching_workspaces">No matching workspaces</string>
     <string name="start_work_no_servers">No servers configured. Add a server to start work.</string>
     <string name="start_work_new_chat">New chat</string>
     <string name="start_work_files">Files</string>
     <string name="start_work_terminal">Terminal</string>
-    <string name="start_work_scoped_action">Open in this exact server and workspace</string>
+    <string name="start_work_section_new">New</string>
+    <string name="start_work_section_existing">Existing</string>
     <string name="start_work_existing_work">Existing work</string>
     <string name="start_work_sessions">Sessions</string>
-    <string name="start_work_sessions_description">Browse sessions in this exact workspace</string>
+    <string name="start_work_sessions_description">Browse existing sessions</string>
     <string name="start_work_server_workspaces">%1$s, %2$d workspaces</string>
     <string name="start_work_action_accessibility">%1$s. %2$s</string>
+    <string name="add_workspace_title">Add workspace</string>
+    <string name="add_workspace_choose_server">Choose a server</string>
+    <string name="add_workspace_server_offline">Offline</string>
+    <string name="add_workspace_path_label">Folder path</string>
+    <string name="add_workspace_name_label">Name (optional)</string>
+    <string name="add_workspace_use_folder">Use this folder</string>
+    <string name="add_workspace_current_folder">Current folder: %1$s</string>
+    <string name="add_workspace_showing_folders">Showing %1$d of %2$d folders. Type a path to go deeper.</string>
+    <string name="add_workspace_browse_unavailable">This server can\'t browse folders. Type the full path.</string>
+    <string name="add_workspace_browse_failed">Couldn\'t list this folder. Go up or type a path.</string>
+    <string name="add_workspace_retry">Retry</string>
+    <string name="add_workspace_checking">Checking folder…</string>
+    <string name="add_workspace_loading">Loading folders…</string>
+    <string name="add_workspace_unverified_warning">This server can\'t check folders. Make sure the path exists.</string>
+    <string name="add_workspace_offline">Server offline. Reconnect to add a workspace.</string>
+    <string name="add_workspace_path_blank">Enter a folder path.</string>
+    <string name="add_workspace_path_absolute">Use a full path starting with / or a drive letter (C:\\).</string>
+    <string name="add_workspace_path_dots">Remove . and .. from the path.</string>
+    <string name="add_workspace_path_control">The path contains characters that can\'t be used.</string>
+    <string name="add_workspace_path_duplicate">Already a workspace on this server.</string>
+    <string name="add_workspace_path_parent_not_listable">Couldn\'t open %1$s on %2$s. Check the path.</string>
+    <string name="add_workspace_path_missing">No folder named %1$s in %2$s.</string>
+    <string name="add_workspace_path_is_file">%1$s is a file. Choose a folder.</string>
+    <string name="add_workspace_path_not_readable">The server can\'t read this folder (permission denied or unavailable).</string>
+    <string name="add_workspace_root_limit">This server already has %1$d workspaces. Remove one first.</string>
+    <string name="add_workspace_save_failed">Couldn\'t save workspace changes.</string>
+    <string name="add_workspace_confirm">Add</string>
+    <string name="workspace_action_open">Workspace actions</string>
+    <string name="workspace_action_rename">Rename…</string>
+    <string name="workspace_action_reset">Reset to automatic name</string>
+    <string name="workspace_action_copy_path">Copy path</string>
+    <string name="workspace_action_copy_path_success">Path copied</string>
+    <string name="workspace_action_add_root">Add as workspace</string>
+    <string name="workspace_action_remove">Remove workspace</string>
+    <string name="workspace_rename_title">Workspace name</string>
+    <string name="workspace_rename_automatic_name">Automatic name: %1$s</string>
+    <string name="workspace_rename_path">Path: %1$s</string>
+    <string name="workspace_rename_reset">Reset to automatic</string>
+    <string name="workspace_rename_save">Save</string>
+    <string name="workspace_remove_title">Remove workspace</string>
+    <string name="workspace_remove_message">Remove workspace “%1$s”? Sessions stay on the server and will be grouped by folder again.</string>
     <string name="server_close_details">Close server details</string>
 </resources>

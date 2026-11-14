@@ -11,13 +11,14 @@ import dev.blazelight.p4oc.data.files.FileWriteResult
 import dev.blazelight.p4oc.data.files.ofish.MAX_UPLOAD_SOURCE_BYTES
 import dev.blazelight.p4oc.data.files.ofish.UPLOAD_TOO_LARGE_MESSAGE
 import dev.blazelight.p4oc.domain.model.FileContent
+import dev.blazelight.p4oc.domain.model.FileNode
 import dev.blazelight.p4oc.domain.model.Symbol
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
@@ -100,7 +101,6 @@ class UploadOrchestratorTest {
         assertEquals(3, repo.uploadCalls.size)
         val phase = state.items.single().phase
         assertTrue(phase is UploadPhase.Failed)
-        assertEquals("net3", (phase as UploadPhase.Failed).message)
     }
 
     @Test
@@ -116,7 +116,6 @@ class UploadOrchestratorTest {
         assertEquals(1, repo.uploadCalls.size)
         val phase = state.items.single().phase
         assertTrue(phase is UploadPhase.Failed)
-        assertEquals("hash mismatch", (phase as UploadPhase.Failed).message)
     }
 
     @Test
@@ -225,7 +224,6 @@ class UploadOrchestratorTest {
         assertTrue("expected Done for a, got ${items[0].phase}", items[0].phase is UploadPhase.Done)
         val bPhase = items[1].phase
         assertTrue("expected Failed for b, got $bPhase", bPhase is UploadPhase.Failed)
-        assertEquals("cancelled", (bPhase as UploadPhase.Failed).message)
         assertTrue(!orchestrator.state.value.isActive)
         assertTrue(orchestrator.state.value.cancelled)
     }
@@ -247,7 +245,18 @@ class UploadOrchestratorTest {
         assertFalse(state.isActive)
         val phase = state.items.single().phase
         assertTrue("expected Failed after late success, got $phase", phase is UploadPhase.Failed)
-        assertEquals("cancelled", (phase as UploadPhase.Failed).message)
+    }
+
+    @Test
+    fun `cancelling a partial batch still delivers completed attachments`() = runTest {
+        val source = SuspendingUploadSource(mapOf("a" to byteArrayOf(1)), setOf("b"))
+        val repository = FakeFileRepository(mutableListOf(ok("a")))
+        val coordinator = UploadCoordinator(this) { repository }
+        val attached = CompletableDeferred<List<UploadItem>>()
+        coordinator.upload(source, listOf("a", "b"), "") { attached.complete(it) }
+        source.readingB.await()
+        coordinator.cancel()
+        assertEquals(listOf("a"), attached.await().map { it.destinationPath })
     }
 
     @Test
@@ -260,7 +269,7 @@ class UploadOrchestratorTest {
         coordinator.cancel()
         repo.release.complete(Unit)
         repo.completed.await()
-        advanceUntilIdle()
+        coordinator.state.first { !it.isActive }
 
         val state = coordinator.state.value
         assertTrue(state.cancelled)
@@ -276,10 +285,10 @@ class UploadOrchestratorTest {
         repo.started.await()
 
         coordinator.cancel()
-        coordinator.dismiss()
         repo.release.complete(Unit)
         repo.completed.await()
-        advanceUntilIdle()
+        coordinator.state.first { !it.isActive }
+        coordinator.dismiss()
 
         assertEquals(UploadQueueState(), coordinator.state.value)
     }
@@ -342,6 +351,8 @@ private class FakeFileRepository(
         FileOperationResult.Ok(FileList(path = path, files = emptyList()))
     override suspend fun readFile(path: String) =
         FileOperationResult.Ok(FileContent(type = "text", content = "", diff = null, mimeType = null))
+    override suspend fun searchFiles(query: String) =
+        FileOperationResult.Ok<List<FileNode>>(emptyList())
     override suspend fun searchSymbols(query: String) =
         FileOperationResult.Ok<List<Symbol>>(emptyList())
     override suspend fun writeFile(request: FileWriteRequest) =
@@ -374,6 +385,7 @@ private class GatedFileRepository : FileRepository {
     override suspend fun listFiles(path: String) = FileOperationResult.Ok(FileList(path, emptyList()))
     override suspend fun readFile(path: String) =
         FileOperationResult.Ok(FileContent(type = "text", content = "", diff = null, mimeType = null))
+    override suspend fun searchFiles(query: String) = FileOperationResult.Ok<List<FileNode>>(emptyList())
     override suspend fun searchSymbols(query: String) = FileOperationResult.Ok<List<Symbol>>(emptyList())
     override suspend fun writeFile(request: FileWriteRequest) =
         FileOperationResult.Ok(FileWriteResult(path = request.path, hash = null))

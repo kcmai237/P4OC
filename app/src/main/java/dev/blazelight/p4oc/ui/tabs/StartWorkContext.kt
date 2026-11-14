@@ -2,7 +2,10 @@ package dev.blazelight.p4oc.ui.tabs
 
 import dev.blazelight.p4oc.domain.server.ServerRef
 import dev.blazelight.p4oc.domain.server.WorkspaceKey
+import dev.blazelight.p4oc.domain.workspace.UserWorkspaceState
+import dev.blazelight.p4oc.domain.workspace.WorkspaceAttribution
 import dev.blazelight.p4oc.ui.screens.home.ScopedHomeRepositoryState
+import dev.blazelight.p4oc.ui.workspace.WorkspaceLabelIndex
 
 data class StartWorkTarget(
     val serverRef: ServerRef,
@@ -119,34 +122,87 @@ fun startWorkContextForHomeDetail(target: StartWorkTarget): StartWorkContext = S
     selection = StartWorkSelection.Selected(target),
 )
 
+/** Picker targets from loaded sessions; a session inside a user root contributes that root. */
 internal fun deriveStartWorkPickerTargets(
     repositories: List<ScopedHomeRepositoryState>,
+    userWorkspaces: UserWorkspaceState = UserWorkspaceState.Empty,
 ): List<StartWorkTarget> = repositories.flatMap { repository ->
+    val roots = userWorkspaces.rootsFor(repository.serverRef.endpointKey)
     repository.state.snapshot.sessions.values.map { session ->
-        StartWorkTarget(repository.serverRef, session.workspace.key)
+        StartWorkTarget(repository.serverRef, WorkspaceAttribution.groupKeyFor(session.session.directory, roots))
     }
 }.distinct()
 
-internal data class StartWorkPickerState(
-    val selectedEndpointKey: String?,
-    val query: String = "",
-)
+/** Workspaces listed per server before the "show more" row takes over. */
+internal const val PICKER_WORKSPACE_PAGE_SIZE = 10
 
-internal fun StartWorkPickerState.filteredTargets(
-    groups: List<StartWorkPickerGroup>,
-): List<StartWorkTarget> {
-    val group = groups.firstOrNull { it.server.endpointKey == selectedEndpointKey } ?: return emptyList()
+/** Workspaces of one server that match [query] by name, path, or host; an empty query keeps every entry. */
+internal fun StartWorkPickerGroup.matchingTargets(query: String): List<StartWorkTarget> {
     val needle = query.trim()
-    return group.targets.filter { target ->
-        target.workspaceKey == WorkspaceKey.Global || needle.isEmpty() ||
-            target.workspaceKey.pickerSearchText().contains(needle, ignoreCase = true)
+    if (needle.isEmpty()) return targets
+    return targets.filter { target ->
+        target.pickerSearchText(labels).contains(needle, ignoreCase = true)
     }
 }
 
-private fun WorkspaceKey.pickerSearchText(): String = when (this) {
-    is WorkspaceKey.Directory -> "$value ${value.trimEnd('/').substringAfterLast('/')}"
+/** One server section of the picker: its header state plus the workspace rows to draw under it. */
+internal data class StartWorkPickerRow(
+    val group: StartWorkPickerGroup,
+    val expanded: Boolean,
+    val matchCount: Int,
+    val visibleTargets: List<StartWorkTarget>,
+    val hiddenCount: Int,
+)
+
+internal data class StartWorkPickerViewState(
+    val query: String = "",
+    /** Explicit expand/collapse the user has toggled, keyed by endpoint. */
+    val expandedOverrides: Map<String, Boolean> = emptyMap(),
+    /** Endpoints where the user asked to see past [PICKER_WORKSPACE_PAGE_SIZE] workspaces. */
+    val showAllEndpointKeys: Set<String> = emptySet(),
+    /** Server expanded by default — normally the one the picker was opened from. */
+    val defaultExpandedEndpointKey: String? = null,
+)
+
+/**
+ * Folds [groups] into the picker's server sections. While searching, non-matching servers drop out
+ * and matching ones open regardless of collapse state, so results are never hidden behind a header.
+ */
+internal fun buildStartWorkPickerRows(
+    groups: List<StartWorkPickerGroup>,
+    state: StartWorkPickerViewState,
+): List<StartWorkPickerRow> {
+    val searching = state.query.isNotBlank()
+    val onlyServer = groups.size == 1
+    return groups.mapNotNull { group ->
+        val endpointKey = group.server.endpointKey
+        val matches = group.matchingTargets(state.query)
+        if (searching && matches.isEmpty()) return@mapNotNull null
+        val expanded = when {
+            searching -> true
+            else -> state.expandedOverrides[endpointKey]
+                ?: (onlyServer || endpointKey == state.defaultExpandedEndpointKey)
+        }
+        val showAll = searching || endpointKey in state.showAllEndpointKeys
+        val visible = when {
+            !expanded -> emptyList()
+            showAll -> matches
+            else -> matches.take(PICKER_WORKSPACE_PAGE_SIZE)
+        }
+        StartWorkPickerRow(
+            group = group,
+            expanded = expanded,
+            matchCount = matches.size,
+            visibleTargets = visible,
+            hiddenCount = if (expanded) matches.size - visible.size else 0,
+        )
+    }
+}
+
+private fun StartWorkTarget.pickerSearchText(labels: WorkspaceLabelIndex): String = when (val key = workspaceKey) {
+    is WorkspaceKey.Directory -> labels.searchText(serverRef, key)
     WorkspaceKey.Global -> "global server root no directory"
-    is WorkspaceKey.SessionScoped -> sessionId.value
+    is WorkspaceKey.SessionScoped -> key.sessionId.value
 }
 
 private fun sourceForRoute(route: String): StartWorkSource = when {

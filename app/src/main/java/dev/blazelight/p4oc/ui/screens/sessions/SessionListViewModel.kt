@@ -11,6 +11,7 @@ import dev.blazelight.p4oc.domain.model.Session
 import dev.blazelight.p4oc.domain.model.SessionPresence
 import dev.blazelight.p4oc.domain.model.SessionStatus
 import dev.blazelight.p4oc.domain.model.resolveSessionPresence
+import dev.blazelight.p4oc.domain.server.ServerRef
 import dev.blazelight.p4oc.domain.session.SessionId
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -30,6 +31,10 @@ class SessionListViewModel constructor(
 
     private val _uiState = MutableStateFlow(SessionListUiState())
     val uiState: StateFlow<SessionListUiState> = _uiState.asStateFlow()
+    val supportsSessionSharing: Boolean get() = sessionRepository.supportsSessionSharing
+
+    /** The owning server, used only to look up workspace display names. */
+    val workspaceServer: ServerRef get() = sessionRepository.workspace.server
 
     companion object {
         internal const val MAX_SEARCH_QUERY_CHARS = 512
@@ -163,6 +168,7 @@ class SessionListViewModel constructor(
                             )
                         },
                         searchResults = if (state.searchQuery.isBlank()) emptyList() else state.searchResults,
+                        hasMoreSessions = sessionRepository.hasMoreSessions,
                         error = if (repoState is RepoState.Stale) {
                             "Could not refresh sessions. Showing the last loaded sessions."
                         } else {
@@ -208,6 +214,7 @@ class SessionListViewModel constructor(
                                     status
                                 )
                             },
+                            hasMoreSessions = sessionRepository.hasMoreSessions,
                             error = null,
                         )
                     }
@@ -227,6 +234,26 @@ class SessionListViewModel constructor(
                     }
                 },
             )
+        }
+    }
+
+    fun loadMoreSessions() {
+        val state = _uiState.value
+        if (state.isLoadingMore || !state.hasMoreSessions) return
+        _uiState.update { it.copy(isLoadingMore = true, error = null) }
+        viewModelScope.launch {
+            val result = sessionRepository.loadMoreSessions()
+            _uiState.update {
+                it.copy(
+                    isLoadingMore = false,
+                    hasMoreSessions = sessionRepository.hasMoreSessions,
+                    error = if (result.isFailure) {
+                        "Could not load more sessions. Check the connection and try again."
+                    } else {
+                        it.error
+                    },
+                )
+            }
         }
     }
 
@@ -397,6 +424,37 @@ class SessionListViewModel constructor(
         }
     }
 
+    fun forkSession(sessionId: String) {
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    forkingSessionIds = it.forkingSessionIds + sessionId,
+                    error = null,
+                )
+            }
+            try {
+                val forked = sessionRepository.forkSession(SessionId(sessionId))
+                _uiState.update {
+                    it.copy(
+                        newSessionId = forked.id.value,
+                        newSessionDirectory = forked.session.directory,
+                        forkingSessionIds = it.forkingSessionIds - sessionId,
+                        error = null,
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLog.e(TAG, "Failed to fork session")
+                _uiState.update { it.copy(error = "Could not fork the session. Try again.") }
+            } finally {
+                _uiState.update {
+                    it.copy(forkingSessionIds = it.forkingSessionIds - sessionId)
+                }
+            }
+        }
+    }
+
     fun deleteSession(sessionId: String) {
         viewModelScope.launch {
             try {
@@ -510,6 +568,9 @@ data class SessionListUiState(
     val newSessionDirectory: String? = null,
     val shareUrl: String? = null,
     val expandedSessionIds: Set<String> = emptySet(),
+    val forkingSessionIds: Set<String> = emptySet(),
+    val isLoadingMore: Boolean = false,
+    val hasMoreSessions: Boolean = false,
     val error: String? = null
 ) {
     val isSearchActive: Boolean

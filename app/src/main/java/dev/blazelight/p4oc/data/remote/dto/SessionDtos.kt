@@ -26,7 +26,7 @@ data class SessionDto(
     val path: String? = null,
     @SerialName("parentID") val parentID: String? = null,
     val title: String,
-    val version: String,
+    val version: String? = null,
     val time: TimeDto,
     val summary: SessionSummaryDto? = null,
     val cost: Double? = null,
@@ -117,12 +117,12 @@ data class RevertSessionRequest(
     @SerialName("partID") val partID: String? = null
 )
 
-// SummarizeSessionRequest removed — the /summarize endpoint body is optional
-// and the server uses its own default provider/model when omitted.
-
 @Serializable
 data class InitSessionRequest(
     @SerialName("messageID") val messageID: String,
     @SerialName("providerID") val providerID: String,
     @SerialName("modelID") val modelID: String
 )
+
+// SummarizeSessionRequest removed — the /summarize endpoint body is optional
+// and the server uses its own default provider/model when omitted.

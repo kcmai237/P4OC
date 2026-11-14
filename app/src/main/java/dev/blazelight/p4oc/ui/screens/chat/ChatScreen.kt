@@ -1,12 +1,15 @@
-@file:Suppress("ImportOrdering")
+@file:Suppress("ImportOrdering", "DEPRECATION")
 
 package dev.blazelight.p4oc.ui.screens.chat
 
+import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -20,32 +23,47 @@ import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import dev.blazelight.p4oc.R
 import dev.blazelight.p4oc.core.network.ConnectionState
-import dev.blazelight.p4oc.domain.model.Part
+import dev.blazelight.p4oc.data.remote.dto.ModelInput
+import dev.blazelight.p4oc.domain.model.Message
 import dev.blazelight.p4oc.domain.model.MessageWithParts
+import dev.blazelight.p4oc.domain.model.Part
 import dev.blazelight.p4oc.domain.model.Permission
 import dev.blazelight.p4oc.domain.model.SessionConnectionState
 import dev.blazelight.p4oc.domain.model.SessionPresence
+import dev.blazelight.p4oc.ui.components.TuiAlertDialog
+import dev.blazelight.p4oc.ui.components.TuiButton
 import dev.blazelight.p4oc.ui.components.TuiConfirmDialog
 import dev.blazelight.p4oc.ui.components.TuiDropdownMenuItem
 import dev.blazelight.p4oc.ui.components.TuiLoadingScreen
 import dev.blazelight.p4oc.ui.components.TuiSnackbar
 import dev.blazelight.p4oc.ui.components.TuiTopBar
+import dev.blazelight.p4oc.ui.components.chat.AttachmentSourceSheet
 import dev.blazelight.p4oc.ui.components.chat.ChatInputBar
+import dev.blazelight.p4oc.ui.components.chat.ChatJumpNavigationButtons
 import dev.blazelight.p4oc.ui.components.chat.FilePickerDialog
-import dev.blazelight.p4oc.ui.components.chat.JumpToBottomButton
 import dev.blazelight.p4oc.ui.components.chat.InlinePermissionPrompt
+import dev.blazelight.p4oc.ui.components.chat.LocalChatMediaLoader
 import dev.blazelight.p4oc.ui.components.chat.ModelAgentSelectorBar
+import dev.blazelight.p4oc.ui.components.chat.PhoneAttachmentSheet
 import dev.blazelight.p4oc.ui.components.command.CommandPalette
 import dev.blazelight.p4oc.ui.components.command.rememberResolvedCommandMetadata
 import dev.blazelight.p4oc.ui.components.question.InlineQuestionCard
+import dev.blazelight.p4oc.ui.components.form.InlineV2FormCard
+import dev.blazelight.p4oc.ui.components.form.InlineV2FormStatusCard
 import dev.blazelight.p4oc.ui.components.status.SessionStatusDot
 import dev.blazelight.p4oc.ui.components.todo.TodoTrackerSheet
 import dev.blazelight.p4oc.ui.components.toolwidgets.ToolWidgetState
@@ -54,6 +72,9 @@ import dev.blazelight.p4oc.ui.screens.files.upload.UploadProgressSheet
 import dev.blazelight.p4oc.ui.theme.LocalOpenCodeTheme
 import dev.blazelight.p4oc.ui.theme.Sizing
 import dev.blazelight.p4oc.ui.theme.Spacing
+import dev.blazelight.p4oc.ui.workspace.LocalWorkspaceLabels
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import org.koin.androidx.compose.koinViewModel
@@ -99,6 +120,39 @@ internal fun hasChatContent(
     hasSessionPendingPermissions: Boolean,
 ): Boolean = hasMessages || isBusy || hasPendingQuestion || hasSessionPendingPermissions
 
+/**
+ * Identity of the workspace an external phone picker was launched against. Deliberately
+ * excludes the session id: it is null until the session loads, so including it made a
+ * process-restored picker result compare against a different key and report a bogus
+ * "workspace changed". The per-screen activity-result registration already binds the
+ * result to the chat that launched it; only the server/workspace can really drift.
+ */
+internal fun attachmentOwnerKey(serverEndpointKey: String, workspaceDirectory: String?): String =
+    "$serverEndpointKey|${workspaceDirectory.orEmpty()}"
+
+internal enum class ChatLoadingOverlay {
+    None,
+    Transparent,
+    Opaque,
+}
+
+/**
+ * Presentation seam for the chat loading indicator. An opaque full-bleed overlay is shown only
+ * while the session messages themselves are loading over an empty transcript, so cached or
+ * populated content stays visible. Incidental in-session steps (slash commands, todos, file
+ * picker) render a small transparent centered indicator regardless of content; when there is no
+ * loading activity at all no overlay is shown.
+ */
+internal fun chatLoadingOverlay(
+    isMessageLoading: Boolean,
+    hasActiveLoadSteps: Boolean,
+    hasContent: Boolean,
+): ChatLoadingOverlay = when {
+    !isMessageLoading && !hasActiveLoadSteps -> ChatLoadingOverlay.None
+    isMessageLoading && !hasContent -> ChatLoadingOverlay.Opaque
+    else -> ChatLoadingOverlay.Transparent
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 @Suppress("LongParameterList", "LongMethod", "CyclomaticComplexMethod", "FunctionNaming")
@@ -112,7 +166,8 @@ fun ChatScreen(
     onProviderAuthRequired: ((String) -> Unit)? = null,
     onSessionLoaded: ((sessionId: String, sessionTitle: String) -> Unit)? = null,
     onConnectionStateChanged: ((SessionConnectionState?) -> Unit)? = null,
-    isActiveTab: Boolean = true
+    isActiveTab: Boolean = true,
+    requestInitialInputFocus: Boolean = false,
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val messages by viewModel.messages.collectAsStateWithLifecycle()
@@ -124,6 +179,7 @@ fun ChatScreen(
 
     // Sub-manager state
     val pendingQuestion by viewModel.dialogManager.pendingQuestion.collectAsStateWithLifecycle()
+    val pendingV2Forms by viewModel.pendingV2Forms.collectAsStateWithLifecycle()
     val pendingPermissionsByCallId by viewModel.dialogManager.pendingPermissionsByCallId.collectAsStateWithLifecycle()
     val sessionPendingPermissions = remember(messages, pendingPermissionsByCallId) {
         unmatchedPendingPermissions(messages, pendingPermissionsByCallId)
@@ -131,6 +187,7 @@ fun ChatScreen(
     val availableAgents by viewModel.modelAgentManager.availableAgents.collectAsStateWithLifecycle()
     val selectedAgent by viewModel.modelAgentManager.selectedAgent.collectAsStateWithLifecycle()
     val availableModels by viewModel.modelAgentManager.availableModels.collectAsStateWithLifecycle()
+    val providerNames by viewModel.modelAgentManager.providerNames.collectAsStateWithLifecycle()
     val selectedModel by viewModel.modelAgentManager.selectedModel.collectAsStateWithLifecycle()
     val selectedReasoningEffort by viewModel.modelAgentManager.selectedReasoningEffort.collectAsStateWithLifecycle()
     val favoriteModels by viewModel.modelAgentManager.favoriteModels.collectAsStateWithLifecycle()
@@ -141,16 +198,40 @@ fun ChatScreen(
     val isPickerLoading by viewModel.filePickerManager.isPickerLoading.collectAsStateWithLifecycle()
     val pickerError by viewModel.filePickerManager.pickerError.collectAsStateWithLifecycle()
     val uploadState by viewModel.filePickerManager.uploadState.collectAsStateWithLifecycle()
+    val phoneReview by viewModel.filePickerManager.phoneReview.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val uploadSource = remember(context) {
         ContentResolverUploadSource(context.applicationContext.contentResolver)
     }
+    val attachmentWorkspace = viewModel.filePickerManager.workspace
+    val attachmentOwner = attachmentOwnerKey(
+        attachmentWorkspace.server.endpointKey,
+        attachmentWorkspace.directory,
+    )
+    var launchedAttachmentOwner by rememberSaveable { mutableStateOf<String?>(null) }
+    var attachmentOwnerError by remember { mutableStateOf(false) }
+    val acceptPhoneSelection: (List<Uri>) -> Unit = { uris ->
+        if (uris.isNotEmpty()) {
+            if (launchedAttachmentOwner == attachmentOwner) {
+                viewModel.filePickerManager.reviewPhoneFiles(
+                    uploadSource,
+                    uris.map { it.toString() },
+                )
+            } else {
+                attachmentOwnerError = true
+            }
+        }
+        launchedAttachmentOwner = null
+    }
     val uploadLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments(),
     ) { uris ->
-        if (!uris.isNullOrEmpty()) {
-            viewModel.filePickerManager.uploadAndAttach(uploadSource, uris.map { it.toString() })
-        }
+        acceptPhoneSelection(uris)
+    }
+    val photosLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia(),
+    ) { uris ->
+        acceptPhoneSelection(uris)
     }
 
     // Notify parent when session is loaded
@@ -174,6 +255,18 @@ fun ChatScreen(
         }
     }
 
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, isActiveTab) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME && isActiveTab) viewModel.refreshPendingForms()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        if (isActiveTab && lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            viewModel.refreshPendingForms()
+        }
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     LaunchedEffect(Unit) {
         viewModel.sessionMissing.collect { onNavigateBack() }
     }
@@ -187,31 +280,56 @@ fun ChatScreen(
     var showCommandPalette by remember { mutableStateOf(false) }
     var showTodoTracker by remember { mutableStateOf(false) }
     var showFilePicker by remember { mutableStateOf(false) }
+    var showAttachmentSources by remember { mutableStateOf(false) }
+    var choosingUploadFolder by remember { mutableStateOf(false) }
+    var showUploads by remember { mutableStateOf(true) }
     var showRevertDialog by remember { mutableStateOf<String?>(null) }
+    if (attachmentOwnerError) {
+        TuiAlertDialog(
+            onDismissRequest = { attachmentOwnerError = false },
+            title = stringResource(R.string.chat_attachment_workspace_changed_title),
+            modifier = Modifier.testTag("chat_attachment_workspace_changed"),
+            confirmButton = {
+                TuiButton(onClick = { attachmentOwnerError = false }) {
+                    Text(stringResource(android.R.string.ok))
+                }
+            },
+        ) {
+            Text(stringResource(R.string.chat_attachment_workspace_changed_message))
+        }
+    }
 
     val scrollRestorationState = rememberSaveable(
         uiState.session?.id,
         saver = ChatScrollRestorationState.Saver
     ) { ChatScrollRestorationState() }
     val messageBlocks = remember(messages, uiState.isBusy) { groupMessagesIntoBlocks(messages, uiState.isBusy) }
+    val olderMessagesItemOffset = if (uiState.hasOlderMessages) 1 else 0
+    // A streaming assistant is initially reported with all-zero token totals.
+    // Retain the newest meaningful usage until the live reply gains real usage.
+    val contextUsage = remember(messages) { latestAssistantContextUsage(messages) }
     val searchMatches = remember(messageBlocks, scrollRestorationState.searchQuery) {
         findChatMatches(messageBlocks, scrollRestorationState.searchQuery)
     }
+    val promptHistory = remember(messages) { messages.toPromptHistory() }
     val coroutineScope = rememberCoroutineScope()
+    var composerFocused by remember { mutableStateOf(false) }
 
-    // Derived state: check if the bottom edge of the last rendered item is visible.
-    val isAtBottom by remember {
+    // Derived state: true when the list cannot advance toward the tail. Keyed on listState so a
+    // session's async null->id load (which recreates listState) cannot leave this observing a
+    // discarded, zero-item instance.
+    val isAtBottom by remember(listState) {
+        derivedStateOf { !listState.canScrollForward }
+    }
+    val previousUserBlockIndex by remember(listState, messageBlocks, olderMessagesItemOffset) {
         derivedStateOf {
-            val layoutInfo = listState.layoutInfo
-            val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()
-            val lastItemIndex = layoutInfo.totalItemsCount - 1
-            val lastItemBottom = (lastVisible?.offset ?: 0) + (lastVisible?.size ?: 0)
-            layoutInfo.totalItemsCount == 0 ||
-                (
-                    lastVisible != null &&
-                        lastVisible.index >= lastItemIndex &&
-                        lastItemBottom <= layoutInfo.viewportEndOffset
-                    )
+            val firstVisibleBlockIndex =
+                (listState.firstVisibleItemIndex - olderMessagesItemOffset).coerceAtMost(messageBlocks.size)
+            previousUserMessageBlockIndex(
+                blocks = messageBlocks,
+                firstVisibleBlockIndex = firstVisibleBlockIndex,
+                firstVisibleItemScrollOffset = listState.firstVisibleItemScrollOffset,
+            )
         }
     }
 
@@ -229,12 +347,23 @@ fun ChatScreen(
         }
     }
 
-    // Match the sticky follow-tail model: only update follow state after the user's scroll settles.
+    // A user drag disables tail-following immediately so IME pinning cannot fight the gesture.
+    LaunchedEffect(listState, uiState.session?.id) {
+        listState.interactionSource.interactions
+            .filterIsInstance<DragInteraction.Start>()
+            .collect { scrollRestorationState.onUserScrollStarted() }
+    }
+
+    // Re-evaluate follow state after any scroll (touch, wheel, keyboard, semantics/TalkBack)
+    // settles. The initial emission is ignored so a freshly composed list does not settle from a
+    // stale position; the frame wait lets the final layout commit before reading the live bottom.
     LaunchedEffect(listState, uiState.session?.id) {
         snapshotFlow { listState.isScrollInProgress }
-            .collect { isScrolling ->
-                if (!isScrolling) {
-                    scrollRestorationState.onScrollSettled(isAtBottom)
+            .drop(1)
+            .collect { scrolling ->
+                if (!scrolling) {
+                    withFrameNanos { }
+                    scrollRestorationState.onScrollSettled(!listState.canScrollForward)
                 }
             }
     }
@@ -251,17 +380,56 @@ fun ChatScreen(
     } ?: 0
     val isBusy = uiState.isBusy
     val pendingQuestionId = pendingQuestion?.id
+    val hasRenderableFormContent = pendingV2Forms.forms.isNotEmpty() ||
+        pendingV2Forms.isLoading || pendingV2Forms.error != null
+    val pendingFormVersion = buildString {
+        append(pendingV2Forms.isLoading)
+        append(pendingV2Forms.error != null)
+        pendingV2Forms.forms.forEach { item ->
+            append(item.id)
+            append(':')
+            append(item.form != null)
+            append(item.isLoading)
+            append(item.error != null)
+        }
+    }
     val pendingPermissionCallIds = pendingPermissionsByCallId.keys
     val pendingPermissionVersion = pendingPermissionAttentionVersion(pendingPermissionCallIds)
+    val hasRenderableTail = !uiState.isLoading &&
+        (messages.isNotEmpty() || pendingQuestionId != null || hasRenderableFormContent)
     var previouslyPendingPermissionCallIds by remember(uiState.session?.id) {
         mutableStateOf(emptySet<String>())
     }
 
     // Scroll on new messages, new parts, or streaming text/reasoning growth.
-    LaunchedEffect(messageCount, tailContentVersion, isBusy, pendingQuestionId) {
-        if (scrollRestorationState.onTailContentChanged(messages.isNotEmpty() || pendingQuestionId != null)) {
+    LaunchedEffect(messageCount, tailContentVersion, isBusy, pendingQuestionId, pendingFormVersion) {
+        if (scrollRestorationState.onTailContentChanged(
+                messages.isNotEmpty() || pendingQuestionId != null || hasRenderableFormContent,
+            )
+        ) {
             listState.scrollChatToBottom()
         }
+    }
+
+    // While the composer is focused and the user is already following the tail, keep the latest
+    // content visible as the IME opens or resizes. This never forces a scrolled-away viewport back
+    // to the tail: it only pins when shouldFollowTail is already true, and scrolling away mid-typing
+    // clears that flag so later viewport changes do not snap. The LazyColumn's actual viewport
+    // height is observed (not the IME inset), so the effect reacts to real layout changes without
+    // recomposing ChatScreen per animation pixel. The initial emission is ignored so merely
+    // focusing the composer cannot scroll; only a real viewport-height transition pins the tail.
+    LaunchedEffect(listState, composerFocused, scrollRestorationState.shouldFollowTail, hasRenderableTail) {
+        if (!scrollRestorationState.shouldPinTailForIme(composerFocused, hasRenderableTail)) {
+            return@LaunchedEffect
+        }
+        snapshotFlow {
+            val info = listState.layoutInfo
+            info.viewportEndOffset - info.viewportStartOffset
+        }
+            .drop(1)
+            .collect {
+                listState.scrollChatToBottom()
+            }
     }
 
     // Permissions can arrive for a tool rendered far above the current viewport without changing
@@ -278,7 +446,6 @@ fun ChatScreen(
             if (blockIndex != null) {
                 // Keep streaming tail updates from immediately pulling the viewport away again.
                 scrollRestorationState.shouldFollowTail = false
-                val olderMessagesItemOffset = if (uiState.hasOlderMessages) 1 else 0
                 listState.scrollToItem(blockIndex + olderMessagesItemOffset)
             } else {
                 scrollRestorationState.onJumpToBottom()
@@ -301,9 +468,7 @@ fun ChatScreen(
     }
 
     // The loading screen hides the list; once the session content is visible, land at the tail.
-    LaunchedEffect(uiState.session?.id, uiState.isLoading, messageCount, pendingQuestionId) {
-        val hasRenderableTail = !uiState.isLoading &&
-            (messages.isNotEmpty() || pendingQuestionId != null)
+    LaunchedEffect(uiState.session?.id, uiState.isLoading, messageCount, pendingQuestionId, pendingFormVersion) {
         when (scrollRestorationState.onContentReady(hasRenderableTail)) {
             InitialTailDecision.ScrollToTail -> {
                 snapshotFlow { listState.layoutInfo.totalItemsCount }.first { it > 0 }
@@ -317,7 +482,8 @@ fun ChatScreen(
     Scaffold(
         topBar = {
             ChatTopBar(
-                title = uiState.session?.title ?: "Chat",
+                // v2 sessions start without a title; match Home's fallback instead of rendering an empty header.
+                title = uiState.session?.title?.ifBlank { "Untitled session" } ?: "Chat",
                 connectionState = connectionState,
                 onBack = onNavigateBack,
                 onTerminal = onOpenTerminal,
@@ -334,7 +500,11 @@ fun ChatScreen(
                     uiState.session?.id?.let { onViewSessionDiff?.invoke(it) }
                 },
                 branchName = branchName,
-                todoCount = uiState.todos.count { it.status == "in_progress" || it.status == "pending" },
+                todoCount = if (viewModel.supportsSessionTodos) {
+                    uiState.todos.count { it.status == "in_progress" || it.status == "pending" }
+                } else {
+                    0
+                },
                 onTodos = {
                     viewModel.loadTodos()
                     showTodoTracker = true
@@ -350,6 +520,12 @@ fun ChatScreen(
                         .imePadding()
                         .navigationBarsPadding()
                 ) {
+                    // Hairline separating the flat composer from the chat above it.
+                    HorizontalDivider(
+                        color = LocalOpenCodeTheme.current.border,
+                        thickness = Sizing.strokeThin
+                    )
+                    uiState.runNotice?.let { notice -> RunNoticeBanner(notice) }
                     ModelAgentSelectorBar(
                         availableAgents = availableAgents,
                         selectedAgent = selectedAgent,
@@ -361,35 +537,68 @@ fun ChatScreen(
                         onReasoningEffortSelected = viewModel.modelAgentManager::selectReasoningEffort,
                         favoriteModels = favoriteModels,
                         recentModels = recentModels,
-                        onToggleFavorite = viewModel.modelAgentManager::toggleFavoriteModel
-                    )
-                    ChatInputBar(
-                        value = uiState.inputText,
-                        onValueChange = { text ->
-                            viewModel.updateInput(text)
-                            if (text.startsWith("/") && !text.contains(" ")) {
-                                viewModel.refreshCommandsIfNeeded()
-                            }
+                        onToggleFavorite = viewModel.modelAgentManager::toggleFavoriteModel,
+                        usedContextTokens = contextUsage?.tokens,
+                        contextUsageModel = contextUsage?.let {
+                            ModelInput(providerID = it.providerID, modelID = it.modelID)
                         },
-                        onSend = viewModel::sendMessage,
-                        isLoading = uiState.isSending,
-                        enabled = connectionState is ConnectionState.Connected,
-                        isBusy = uiState.isBusy,
-                        onAbort = viewModel::abortSession,
-                        attachedFiles = attachedFiles,
-                        onAttachClick = {
-                            viewModel.filePickerManager.loadPickerFiles()
-                            showFilePicker = true
-                        },
-                        onRemoveAttachment = viewModel.filePickerManager::detachFile,
-                        commands = uiState.commands,
-                        isLoadingCommands = uiState.isLoadingCommands,
-                        commandLoadError = uiState.commandLoadError,
-                        onRetryCommands = { viewModel.refreshCommandsIfNeeded(force = true) },
-                        onCommandSelected = { /* Command text is already updated via onValueChange */ },
-                        requestFocus = isActiveTab,
-                        enterToSend = chatSettings.enterToSend,
+                        providerNames = providerNames,
                     )
+                    if (uploadState.isActive || uploadState.failures.isNotEmpty()) {
+                        val theme = LocalOpenCodeTheme.current
+                        TextButton(
+                            onClick = { showUploads = true },
+                            modifier = Modifier.testTag("review_pending_uploads"),
+                        ) {
+                            Text(
+                                if (uploadState.isActive) {
+                                    stringResource(R.string.chat_upload_active_review)
+                                } else {
+                                    stringResource(R.string.chat_upload_attention_review)
+                                },
+                                color = if (uploadState.isActive) theme.accent else theme.warning,
+                            )
+                        }
+                    }
+                    CompositionLocalProvider(LocalChatMediaLoader provides viewModel.mediaLoader) {
+                        ChatInputBar(
+                            value = uiState.inputText,
+                            valueSyncGeneration = uiState.inputSyncGeneration,
+                            onValueChange = { text ->
+                                viewModel.updateInput(text)
+                                if (text.startsWith("/") && !text.contains(" ")) {
+                                    viewModel.refreshCommandsIfNeeded()
+                                }
+                            },
+                            onSend = { viewModel.sendMessage() },
+                            isLoading = uiState.isSending,
+                            enabled = connectionState is ConnectionState.Connected,
+                            isBusy = uiState.isBusy,
+                            onAbort = viewModel::abortSession,
+                            attachedFiles = attachedFiles,
+                            workspaceDirectory = viewModel.filePickerManager.workspace.directory,
+                            submissionBlocked = viewModel.filePickerManager.hasUnresolvedUploads,
+                            onAttachClick = {
+                                if (uploadState.isActive || uploadState.failures.isNotEmpty()) {
+                                    showUploads = true
+                                } else {
+                                    showAttachmentSources = true
+                                }
+                            },
+                            onRemoveAttachment = viewModel.filePickerManager::detachFile,
+                            commands = uiState.commands,
+                            isLoadingCommands = uiState.isLoadingCommands,
+                            commandLoadError = uiState.commandLoadError,
+                            onRetryCommands = { viewModel.refreshCommandsIfNeeded(force = true) },
+                            onCommandSelected = { /* Command text is already updated via onValueChange */ },
+                            requestFocus = requestInitialInputFocus,
+                            isActiveTab = isActiveTab,
+                            onComposerFocusChanged = { composerFocused = it },
+                            promptHistory = promptHistory,
+                            promptHistorySessionId = uiState.session?.id,
+                            enterToSend = chatSettings.enterToSend,
+                        )
+                    }
                 }
             }
         }
@@ -462,7 +671,7 @@ fun ChatScreen(
                     isBusy = uiState.isBusy,
                     hasPendingQuestion = pendingQuestion != null,
                     hasSessionPendingPermissions = sessionPendingPermissions.isNotEmpty(),
-                )
+                ) || hasRenderableFormContent
 
                 if (!hasContent && !uiState.isLoading) {
                     EmptyChatView(modifier = Modifier.align(Alignment.Center))
@@ -510,17 +719,19 @@ fun ChatScreen(
                                 Modifier
                             }
                             Box(modifier = highlight) {
-                                MessageBlockView(
-                                    block = block,
-                                    onToolApprove = { viewModel.respondToPermission(it, "once") },
-                                    onToolDeny = { viewModel.respondToPermission(it, "reject") },
-                                    onToolAlways = { viewModel.respondToPermission(it, "always") },
-                                    onOpenSubSession = onOpenSubSession,
-                                    onProviderAuthRequired = onProviderAuthRequired,
-                                    defaultToolWidgetState = defaultToolWidgetState,
-                                    pendingPermissionsByCallId = pendingPermissionsByCallId,
-                                    onRevert = { messageId -> showRevertDialog = messageId }
-                                )
+                                CompositionLocalProvider(LocalChatMediaLoader provides viewModel.mediaLoader) {
+                                    MessageBlockView(
+                                        block = block,
+                                        onToolApprove = { viewModel.respondToPermission(it, "once") },
+                                        onToolDeny = { viewModel.respondToPermission(it, "reject") },
+                                        onToolAlways = { viewModel.respondToPermission(it, "always") },
+                                        onOpenSubSession = onOpenSubSession,
+                                        onProviderAuthRequired = onProviderAuthRequired,
+                                        defaultToolWidgetState = defaultToolWidgetState,
+                                        pendingPermissionsByCallId = pendingPermissionsByCallId,
+                                        onRevert = { messageId -> showRevertDialog = messageId }
+                                    )
+                                }
                             }
                         }
 
@@ -552,6 +763,41 @@ fun ChatScreen(
                                 )
                             }
                         }
+
+                        if (pendingV2Forms.isLoading && pendingV2Forms.forms.isEmpty()) {
+                            item(key = "pending_forms_loading") {
+                                InlineV2FormStatusCard(
+                                    message = stringResource(R.string.v2_form_checking_pending),
+                                    isLoading = true,
+                                    modifier = Modifier.padding(vertical = Spacing.xs),
+                                )
+                            }
+                        }
+                        pendingV2Forms.error?.let { error ->
+                            item(key = "pending_forms_error") {
+                                InlineV2FormStatusCard(
+                                    message = error,
+                                    isLoading = false,
+                                    onRetry = viewModel::refreshPendingForms,
+                                    modifier = Modifier.padding(vertical = Spacing.xs),
+                                )
+                            }
+                        }
+                        itemsIndexed(
+                            items = pendingV2Forms.forms,
+                            key = { _, item -> "pending_v2_form_${item.id}" },
+                        ) { _, item ->
+                            InlineV2FormCard(
+                                form = item.form,
+                                isLoading = item.isLoading,
+                                isSubmitting = item.isSubmitting,
+                                error = item.error,
+                                onSubmit = { answer -> viewModel.respondToForm(item.id, answer) },
+                                onReject = { viewModel.rejectPendingForm(item.id) },
+                                onRetry = { viewModel.retryPendingForm(item.id) },
+                                modifier = Modifier.padding(vertical = Spacing.xs),
+                            )
+                        }
                     }
                 }
 
@@ -559,9 +805,27 @@ fun ChatScreen(
                     addAll(uiState.loadingSteps)
                     if (isPickerLoading) add("Loading files")
                 }
-                if (uiState.isLoading || activeLoadSteps.isNotEmpty()) {
+                val overlayPresentation = chatLoadingOverlay(
+                    isMessageLoading = uiState.isLoading,
+                    hasActiveLoadSteps = activeLoadSteps.isNotEmpty(),
+                    hasContent = hasContent,
+                )
+                if (overlayPresentation != ChatLoadingOverlay.None) {
+                    val loadingDescription = stringResource(R.string.cd_loading)
+                    val modifier = when (overlayPresentation) {
+                        ChatLoadingOverlay.Opaque ->
+                            Modifier
+                                .matchParentSize()
+                                .background(LocalOpenCodeTheme.current.background)
+                        ChatLoadingOverlay.Transparent ->
+                            Modifier
+                                .align(Alignment.Center)
+                        ChatLoadingOverlay.None -> Modifier
+                    }
                     TuiLoadingScreen(
-                        modifier = Modifier.align(Alignment.Center),
+                        modifier = modifier
+                            .testTag("chat_loading_overlay")
+                            .semantics { contentDescription = loadingDescription },
                         text = activeLoadSteps.ifEmpty { listOf("Loading session") }.joinToString("\n")
                     )
                 }
@@ -581,11 +845,19 @@ fun ChatScreen(
                     }
                 }
 
-                // Jump to bottom button - shows when scrolled away from the tail.
-                JumpToBottomButton(
-                    visible = !isAtBottom,
+                ChatJumpNavigationButtons(
+                    showPrevious = previousUserBlockIndex != null,
+                    showBottom = !isAtBottom,
                     hasNewContent = scrollRestorationState.hasNewContentWhileAway,
-                    onClick = {
+                    onPrevious = {
+                        previousUserBlockIndex?.let { blockIndex ->
+                            coroutineScope.launch {
+                                scrollRestorationState.onJumpToPreviousUser()
+                                listState.scrollToItem(blockIndex + olderMessagesItemOffset)
+                            }
+                        }
+                    },
+                    onBottom = {
                         coroutineScope.launch {
                             scrollRestorationState.onJumpToBottom()
                             listState.scrollChatToBottom()
@@ -605,6 +877,7 @@ fun ChatScreen(
             commands = resolvedCommands,
             isLoading = uiState.isLoadingCommands,
             error = uiState.commandLoadError,
+            executionError = uiState.error,
             onRetry = { viewModel.refreshCommandsIfNeeded(force = true) },
             onCommandSelected = { command, args ->
                 viewModel.executeCommand(command.name, args)
@@ -622,14 +895,74 @@ fun ChatScreen(
         )
     }
 
+    if (showAttachmentSources) {
+        AttachmentSourceSheet(
+            onPhotos = {
+                launchedAttachmentOwner = attachmentOwner
+                showAttachmentSources = false
+                photosLauncher.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                )
+            },
+            onPhoneFiles = {
+                launchedAttachmentOwner = attachmentOwner
+                showAttachmentSources = false
+                uploadLauncher.launch(arrayOf("*/*"))
+            },
+            onWorkspace = {
+                showAttachmentSources = false
+                viewModel.filePickerManager.loadPickerFiles()
+                showFilePicker = true
+            },
+            onDismiss = { showAttachmentSources = false },
+        )
+    }
+    phoneReview
+        ?.takeUnless { choosingUploadFolder }
+        ?.let { review ->
+            val workspace = viewModel.filePickerManager.workspace
+            PhoneAttachmentSheet(
+                review = review,
+                destination =
+                    "${workspace.server.displayName}\n" +
+                        "${workspace.directory.orEmpty().trimEnd('/')}/${pickerCurrentPath.trim('/')}",
+                destinationError =
+                    if (workspace.directory == null) {
+                        stringResource(R.string.attach_review_workspace_required)
+                    } else {
+                        pickerError
+                    },
+                loadingDestination = isPickerLoading,
+                onChangeFolder = {
+                    choosingUploadFolder = true
+                    showFilePicker = true
+                },
+                onRemove = viewModel.filePickerManager::removePhoneFile,
+                onUpload = {
+                    showUploads = true
+                    viewModel.filePickerManager.confirmPhoneUpload(uploadSource)
+                },
+                onDismiss = viewModel.filePickerManager::cancelPhoneReview,
+            )
+        }
+
     if (showFilePicker) {
+        val workspaceLabels = LocalWorkspaceLabels.current
+        val pickerWorkspaceLabel = attachmentWorkspace.directory
+            ?.let { directory ->
+                val label = workspaceLabels.directoryLabel(attachmentWorkspace.server.endpointKey, directory)
+                "${attachmentWorkspace.server.displayName} · ${label.primary}\n${label.path}"
+            }
+            ?: "${attachmentWorkspace.server.displayName}\n${stringResource(R.string.picker_server_workspace)}"
         FilePickerDialog(
-            files = pickerFiles,
+            files =
+                if (choosingUploadFolder) pickerFiles.filter { it.isDirectory } else pickerFiles,
             currentPath = pickerCurrentPath,
+            workspaceLabel = pickerWorkspaceLabel,
             isLoading = isPickerLoading,
             error = pickerError,
             selectedFiles = attachedFiles,
-            onUploadClick = { uploadLauncher.launch(arrayOf("*/*")) },
+            choosingDirectory = choosingUploadFolder,
             onNavigateTo = { path -> viewModel.filePickerManager.loadPickerFiles(path.ifBlank { "." }) },
             onNavigateUp = {
                 val parent = pickerCurrentPath.substringBeforeLast("/", "")
@@ -637,17 +970,34 @@ fun ChatScreen(
             },
             onFileSelected = { viewModel.filePickerManager.attachFile(it) },
             onFileDeselected = { viewModel.filePickerManager.detachFile(it) },
-            onConfirm = { showFilePicker = false },
-            onDismiss = { showFilePicker = false }
+            onConfirm = {
+                showFilePicker = false
+                choosingUploadFolder = false
+            },
+            onDismiss = {
+                showFilePicker = false
+                choosingUploadFolder = false
+            },
         )
     }
 
-    if (!uploadState.isEmpty) {
+    if (showUploads && (!uploadState.isEmpty || uploadState.isActive)) {
         UploadProgressSheet(
             state = uploadState,
             onCancel = { viewModel.filePickerManager.cancelUploads() },
-            onDismiss = { viewModel.filePickerManager.dismissUploadResult() },
+            // Dismissal must clear the terminal queue, not just hide the sheet: the gate above
+            // re-opens on the retained state, and a remembered visibility flag is lost on the
+            // next composition (tab re-entry, rotation, restore), so the summary would return.
+            onDismiss = {
+                viewModel.filePickerManager.dismissUploadResult()
+                showUploads = false
+            },
             onRetryFailed = { viewModel.filePickerManager.retryFailedUploads() },
+            onRemoveFailed = {
+                viewModel.filePickerManager.dismissUploadResult()
+                showUploads = false
+            },
+            contextLabel = stringResource(R.string.upload_sheet_draft_context),
         )
     }
 
@@ -660,6 +1010,49 @@ fun ChatScreen(
             confirmText = stringResource(R.string.revert_changes),
             dismissText = stringResource(R.string.button_cancel),
             isDestructive = true
+        )
+    }
+}
+
+internal data class AssistantContextUsage(
+    val tokens: Long,
+    val providerID: String,
+    val modelID: String,
+)
+
+internal fun latestAssistantContextUsage(messages: List<MessageWithParts>): AssistantContextUsage? =
+    messages.asReversed().firstNotNullOfOrNull { messageWithParts ->
+        val assistant = messageWithParts.message as? Message.Assistant
+            ?: return@firstNotNullOfOrNull null
+        val tokens = assistant.tokens.run {
+            input + output + reasoning + cacheRead + cacheWrite
+        }
+        if (tokens <= 0L) {
+            null
+        } else {
+            AssistantContextUsage(
+                tokens = tokens,
+                providerID = assistant.providerID,
+                modelID = assistant.modelID,
+            )
+        }
+    }
+
+@Composable
+@Suppress("FunctionNaming")
+private fun RunNoticeBanner(message: String) {
+    val theme = LocalOpenCodeTheme.current
+    Surface(
+        color = theme.warning.copy(alpha = 0.15f),
+        shape = RectangleShape,
+    ) {
+        Text(
+            text = "! $message",
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = Spacing.md, vertical = Spacing.sm),
+            style = MaterialTheme.typography.bodySmall,
+            color = theme.warning,
         )
     }
 }
@@ -683,27 +1076,38 @@ private fun ChatTopBar(
     var showOverflow by remember { mutableStateOf(false) }
 
     TuiTopBar(
-        title = title,
         onNavigateBack = onBack,
-        actions = {
-            // Compact status: connection dot + branch (no 40dp boxes)
-            ConnectionDot(state = connectionState)
-            branchName?.let { branch ->
-                Text(
-                    text = "${stringResource(R.string.vcs_branch_prefix)} $branch",
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        fontFamily = FontFamily.Monospace
-                    ),
-                    color = theme.textMuted,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier
-                        .widthIn(max = Sizing.panelWidthSm) // 80dp — tighter
-                        .padding(start = Spacing.xxs)
-                )
+        titleContent = {
+            Column {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    ConnectionDot(state = connectionState)
+                    Spacer(Modifier.width(Spacing.xs))
+                    Text(
+                        text = title,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.titleSmall.copy(
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    )
+                }
+                // Branch sits below the title so it gets full width instead of
+                // being squeezed/truncated in the actions row.
+                branchName?.let { branch ->
+                    Text(
+                        text = "${stringResource(R.string.vcs_branch_prefix)} $branch",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontFamily = FontFamily.Monospace
+                        ),
+                        color = theme.textMuted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
-
-            Spacer(Modifier.width(Spacing.xs))
+        },
+        title = title,
+        actions = {
             // Todo count — only when there are todos (TUI glyph, no rounded badge)
             if (todoCount > 0) {
                 IconButton(
@@ -723,13 +1127,13 @@ private fun ChatTopBar(
             Box {
                 IconButton(
                     onClick = { showOverflow = true },
-                    modifier = Modifier.size(Sizing.iconButtonMd).testTag("chat_overflow_button")
+                    modifier = Modifier.size(Sizing.iconButtonLg).testTag("chat_overflow_button")
                 ) {
                     Text(
                         text = "≡",
-                        color = theme.accent,
+                        color = theme.text,
                         fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.titleMedium
+                        style = MaterialTheme.typography.headlineSmall
                     )
                 }
                 DropdownMenu(
@@ -821,6 +1225,18 @@ private fun EmptyChatView(modifier: Modifier = Modifier) {
 private suspend fun LazyListState.scrollChatToBottom() {
     val target = layoutInfo.totalItemsCount - 1
     if (target >= 0) scrollToItem(target, Int.MAX_VALUE)
+}
+
+internal fun List<MessageWithParts>.toPromptHistory(): List<String> {
+    val prompts = mapNotNull { messageWithParts ->
+        if (messageWithParts.message !is Message.User) return@mapNotNull null
+        messageWithParts.parts
+            .filterIsInstance<Part.Text>()
+            .filter { !it.synthetic && !it.ignored }
+            .joinToString(separator = "\n") { it.text }
+            .takeIf(String::isNotBlank)
+    }
+    return prompts.asReversed().distinct().asReversed()
 }
 
 // MessageBlock, groupMessagesIntoBlocks, and MessageBlockView are now in MessageBlockUtils.kt

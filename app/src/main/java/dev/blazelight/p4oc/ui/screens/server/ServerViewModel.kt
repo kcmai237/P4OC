@@ -22,8 +22,12 @@ import dev.blazelight.p4oc.domain.server.ServerIdentity
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.security.cert.CertPathValidatorException
+import java.security.cert.CertificateException
+import javax.net.ssl.SSLException
 
 enum class ServerConnectionStatus { CONNECTED, CONNECTING, AVAILABLE, DISCONNECTED, ERROR }
 
@@ -92,7 +96,13 @@ class ServerViewModel constructor(
         loadRecentServers()
         loadSavedServers()
         collectDiscoveryFlows()
-        if (autoReconnect) tryAutoReconnect()
+        if (autoReconnect) {
+            viewModelScope.launch {
+                if (settingsDataStore.connectionSettings.first().autoReconnect) {
+                    tryAutoReconnect()
+                }
+            }
+        }
     }
 
     private fun loadRecentServers() {
@@ -111,58 +121,56 @@ class ServerViewModel constructor(
         }
     }
 
-    private fun tryAutoReconnect() {
-        viewModelScope.launch {
-            val (lastConfig, password) = settingsDataStore.getLastConnection() ?: return@launch
+    private suspend fun tryAutoReconnect() {
+        val (lastConfig, password) = settingsDataStore.getLastConnection() ?: return
 
-            AppLog.d(TAG, "Found last connection")
-            val endpointKey = ServerUrl.endpointKey(lastConfig.url)
-            _uiState.update {
-                it.copy(
-                    isConnecting = true,
-                    connectingEndpointKey = endpointKey,
-                    remoteUrl = lastConfig.url,
-                    username = lastConfig.username ?: ServerUrl.DEFAULT_USERNAME,
-                    password = password ?: "",
-                    allowInsecure = lastConfig.allowInsecure
-                )
-            }
-
-            val server = SavedServerRegistry.fromConnection(
-                url = lastConfig.url,
-                name = lastConfig.name,
-                username = lastConfig.username,
-                allowInsecure = lastConfig.allowInsecure,
-            )
-            val result = serverConnectionRegistry.connectAndAwait(server, password)
-
-            result.fold(
-                onSuccess = { projects ->
-                    AppLog.d(TAG, "Auto-reconnect successful")
-                    initializeProjectContext()
-                    _uiState.update {
-                        it.copy(
-                            isConnecting = false,
-                            isConnected = true,
-                            connectingEndpointKey = null,
-                            connectedEndpointKey = endpointKey,
-                            failedEndpointKey = null,
-                        )
-                    }
-                },
-                onFailure = { error ->
-                    AppLog.w(TAG, "Auto-reconnect failed")
-                    _uiState.update {
-                        it.copy(
-                            isConnecting = false,
-                            connectingEndpointKey = null,
-                            failedEndpointKey = endpointKey,
-                            error = "Could not reconnect to the server. Check the address and connection."
-                        )
-                    }
-                }
+        AppLog.d(TAG, "Found last connection")
+        val endpointKey = ServerUrl.endpointKey(lastConfig.url)
+        _uiState.update {
+            it.copy(
+                isConnecting = true,
+                connectingEndpointKey = endpointKey,
+                remoteUrl = lastConfig.url,
+                username = lastConfig.username ?: ServerUrl.DEFAULT_USERNAME,
+                password = password ?: "",
+                allowInsecure = lastConfig.allowInsecure
             )
         }
+
+        val server = SavedServerRegistry.fromConnection(
+            url = lastConfig.url,
+            name = lastConfig.name,
+            username = lastConfig.username,
+            allowInsecure = lastConfig.allowInsecure,
+        )
+        val result = serverConnectionRegistry.connectAndAwait(server, password)
+
+        result.fold(
+            onSuccess = { projects ->
+                AppLog.d(TAG, "Auto-reconnect successful")
+                initializeProjectContext()
+                _uiState.update {
+                    it.copy(
+                        isConnecting = false,
+                        isConnected = true,
+                        connectingEndpointKey = null,
+                        connectedEndpointKey = endpointKey,
+                        failedEndpointKey = null,
+                    )
+                }
+            },
+            onFailure = { error ->
+                AppLog.w(TAG, "Auto-reconnect failed")
+                _uiState.update {
+                    it.copy(
+                        isConnecting = false,
+                        connectingEndpointKey = null,
+                        failedEndpointKey = endpointKey,
+                        error = "Could not reconnect to the server. Check the address and connection."
+                    )
+                }
+            }
+        )
     }
 
     fun setRemoteUrl(url: String) {
@@ -185,9 +193,10 @@ class ServerViewModel constructor(
         val state = _uiState.value
         AppLog.d(TAG, "connectToRemote called")
 
-        if (state.remoteUrl.isBlank()) {
-            AppLog.w(TAG, "URL is blank, showing error")
-            _uiState.update { it.copy(error = "Please enter a server URL") }
+        val formError = state.connectFormError()
+        if (formError != null) {
+            AppLog.w(TAG, "Connect form incomplete")
+            _uiState.update { it.copy(error = formError) }
             return
         }
 
@@ -199,17 +208,6 @@ class ServerViewModel constructor(
                 return@launch
             }
             val password = state.password.takeIf { it.isNotBlank() }
-            if (state.username.isNotBlank() && password != null &&
-                !ServerUrl.allowsCleartextCredentials(url)
-            ) {
-                _uiState.update {
-                    it.copy(
-                        isConnecting = false,
-                        error = "Credentials require HTTPS outside a private local network",
-                    )
-                }
-                return@launch
-            }
             val endpointKey = ServerUrl.endpointKey(url)
             _uiState.update {
                 it.copy(
@@ -260,11 +258,15 @@ class ServerViewModel constructor(
                             connectingEndpointKey = null,
                             connectedEndpointKey = endpointKey,
                             failedEndpointKey = null,
+                            showTlsOptions = false,
                         )
                     }
                 },
                 onFailure = { error ->
                     AppLog.e(TAG, "Connection failed")
+                    // A TLS trust failure is the only case where the self-signed escape hatch is
+                    // useful, so it stays hidden until an attempt actually fails that way.
+                    val tlsFailure = error.isTlsTrustFailure()
                     // Clear password from UI state on failure too - user can re-enter
                     _uiState.update {
                         it.copy(
@@ -272,7 +274,12 @@ class ServerViewModel constructor(
                             connectingEndpointKey = null,
                             failedEndpointKey = endpointKey,
                             password = "",
-                            error = "Could not connect to the server. Check the address, credentials, and connection."
+                            showTlsOptions = it.showTlsOptions || tlsFailure,
+                            error = if (tlsFailure) {
+                                "The server's TLS certificate is not trusted."
+                            } else {
+                                "Could not connect. Check the address, credentials, and network."
+                            }
                         )
                     }
                 }
@@ -313,6 +320,7 @@ class ServerViewModel constructor(
                 username = server.username ?: ServerUrl.DEFAULT_USERNAME,
                 password = password,
                 allowInsecure = server.allowInsecure,
+                showTlsOptions = server.allowInsecure,
                 error = null,
             )
         }
@@ -342,7 +350,10 @@ class ServerViewModel constructor(
                 defaultWorkspace = server.defaultWorkspace,
                 lastConnectedAt = server.lastConnectedAt,
             )
-            if (updated.id != server.id) settingsDataStore.removeSavedServer(server.id)
+            if (updated.id != server.id) {
+                settingsDataStore.moveUserWorkspaces(server.endpointKey, updated.endpointKey)
+                settingsDataStore.removeSavedServer(server.id)
+            }
             _uiState.update { it.copy(remoteUrl = updated.endpoint, password = "", error = null) }
         }
     }
@@ -384,13 +395,20 @@ class ServerViewModel constructor(
     }
 
     fun connectToDiscoveredServer(server: DiscoveredServer) {
+        // Reuse a stored password when we already know this endpoint. A missing password is valid:
+        // passwordless OpenCode servers must still be allowed to attempt the connection.
+        val savedPassword = credentialStore.getServerPassword(server.url).orEmpty()
         _uiState.update {
             it.copy(
                 remoteUrl = server.url,
                 serverNameCandidate = server.serviceName,
                 username = ServerUrl.DEFAULT_USERNAME,
-                password = "",
-                allowInsecure = server.allowInsecure
+                password = savedPassword,
+                // A one-tap network result always verifies TLS, even when a seed for the same
+                // host:port was trusted earlier (#67). If verification fails, the TLS toggle is
+                // shown so turning checks off stays an explicit choice in the form.
+                allowInsecure = false,
+                showTlsOptions = false,
             )
         }
         connectToRemote()
@@ -410,12 +428,43 @@ class ServerViewModel constructor(
     }
 }
 
+/**
+ * Why the connect form cannot be submitted yet, or `null` when it is complete. Authentication is
+ * optional. The username defaults to OpenCode's conventional value, and is only required when a
+ * password is supplied.
+ */
+internal fun ServerUiState.connectFormError(): String? = when {
+    remoteUrl.isBlank() -> "Enter a server URL"
+    password.isNotBlank() && username.isBlank() -> "Enter a username (usually opencode)"
+    else -> null
+}
+
+/** True when [this] (or any cause beneath it) is a certificate/TLS trust failure. */
+internal fun Throwable.isTlsTrustFailure(): Boolean {
+    var current: Throwable? = this
+    val seen = HashSet<Throwable>()
+    while (current != null && seen.add(current)) {
+        val isTls = current is SSLException ||
+            current is CertificateException ||
+            current is CertPathValidatorException
+        if (isTls) return true
+        current = current.cause
+    }
+    return false
+}
+
 data class ServerUiState(
     val remoteUrl: String = "",
     val serverNameCandidate: String? = null,
-    val username: String = "opencode",
+    val username: String = ServerUrl.DEFAULT_USERNAME,
     val password: String = "",
     val allowInsecure: Boolean = false,
+    /**
+     * Whether to surface the self-signed-certificate escape hatch. OpenCode is normally served
+     * over plain HTTP, so the toggle only appears once a connection actually fails TLS validation
+     * (or when editing a server that already has it on).
+     */
+    val showTlsOptions: Boolean = false,
     val isConnecting: Boolean = false,
     val isConnected: Boolean = false,
     val error: String? = null,

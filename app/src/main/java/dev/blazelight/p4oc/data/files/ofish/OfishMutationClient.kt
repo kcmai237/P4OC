@@ -186,7 +186,7 @@ internal class OfishMutationClient(
     ): FileOperationResult<FileUploadResult> {
         val initStatus = execute(
             sessionId,
-            commandBuilder.uploadInit(path, request.expectedHash, capabilities),
+            commandBuilder.uploadInit(path, request.expectedHash, capabilities, request.createOnly),
             MARKER_UPLOAD_INIT,
         )
         val uploadToken = when (initStatus) {
@@ -235,7 +235,13 @@ internal class OfishMutationClient(
             val finishStatus =
                 execute(
                     sessionId,
-                    commandBuilder.uploadFinish(path, uploadToken, request.expectedHash, capabilities),
+                    commandBuilder.uploadFinish(
+                        path,
+                        uploadToken,
+                        request.expectedHash,
+                        capabilities,
+                        request.createOnly
+                    ),
                     MARKER_UPLOAD_FINISH,
                 )
             val result = finishStatus.toUploadResult(path)
@@ -300,18 +306,17 @@ internal class OfishMutationClient(
         command: String,
         expectedMarker: String,
     ): OfishMutationStatus {
-        val response = client.executeShellCommand(
+        val output = client.executeShellOutput(
             sessionId = sessionId,
             request = ShellCommandRequest(
                 agent = shellAgent,
                 model = null,
                 command = command,
             ),
+            marker = expectedMarker,
+        ) ?: return OfishMutationStatus.Malformed(
+            "Malformed OFISH mutation output: missing $expectedMarker output segment"
         )
-        val output = OfishShellOutputExtractor.extractMutationSegment(response, expectedMarker)
-            ?: return OfishMutationStatus.Malformed(
-                "Malformed OFISH mutation output: missing $expectedMarker output segment"
-            )
         return OfishMutationParser.parse(output, expectedMarker)
     }
 

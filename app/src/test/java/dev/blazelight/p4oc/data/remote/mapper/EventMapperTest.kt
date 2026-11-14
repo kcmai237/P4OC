@@ -27,7 +27,7 @@ import org.junit.Test
 class EventMapperTest {
 
     private val json = Json { ignoreUnknownKeys = true }
-    private val messageMapper = MessageMapper(json)
+    private val messageMapper = MessageMapper()
     private val eventMapper = EventMapper(json, messageMapper)
 
     @Before
@@ -187,8 +187,8 @@ class EventMapperTest {
         assertEquals("claude-3", assistant.modelID)
         assertEquals("build", assistant.agent)
         assertEquals(0.05, assistant.cost, 0.001)
-        assertEquals(100, assistant.tokens.input)
-        assertEquals(200, assistant.tokens.output)
+        assertEquals(100L, assistant.tokens.input)
+        assertEquals(200L, assistant.tokens.output)
     }
 
     // ── message.part.updated ────────────────────────────────────────────────
@@ -472,6 +472,48 @@ class EventMapperTest {
 
         assertTrue(event is OpenCodeEvent.SessionError)
         assertEquals("anthropic", (event as OpenCodeEvent.SessionError).error?.providerID)
+    }
+
+    @Test
+    fun `maps session_error retry metadata for rate limit feedback`() {
+        val properties = buildJsonObject {
+            put("sessionID", "sess-1")
+            putJsonObject("error") {
+                put("name", "APIError")
+                putJsonObject("data") {
+                    put("message", "Rate limit exceeded")
+                    put("statusCode", 429)
+                    put("isRetryable", true)
+                }
+            }
+        }
+
+        val event = eventMapper.mapToEvent(EventDataDto(type = "session.error", properties = properties))
+
+        assertTrue(event is OpenCodeEvent.SessionError)
+        val error = (event as OpenCodeEvent.SessionError).error
+        assertEquals(429, error?.statusCode)
+        assertTrue(error?.isRetryable == true)
+    }
+
+    @Test
+    fun `maps session_error without retry metadata as non retryable`() {
+        val properties = buildJsonObject {
+            put("sessionID", "sess-1")
+            putJsonObject("error") {
+                put("name", "APIError")
+                putJsonObject("data") {
+                    put("message", "hard failure")
+                }
+            }
+        }
+
+        val event = eventMapper.mapToEvent(EventDataDto(type = "session.error", properties = properties))
+
+        assertTrue(event is OpenCodeEvent.SessionError)
+        val error = (event as OpenCodeEvent.SessionError).error
+        assertNull(error?.statusCode)
+        assertFalse(error?.isRetryable ?: true)
     }
 
     // ── Unknown type ────────────────────────────────────────────────────────

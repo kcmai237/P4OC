@@ -3,8 +3,14 @@ package dev.blazelight.p4oc.di
 import androidx.lifecycle.SavedStateHandle
 import dev.blazelight.p4oc.core.datastore.SettingsDataStore
 import dev.blazelight.p4oc.core.haptic.HapticFeedback
+import dev.blazelight.p4oc.core.lifecycle.ForegroundState
+import dev.blazelight.p4oc.core.lifecycle.MutableForegroundState
+import dev.blazelight.p4oc.core.network.AndroidNetworkMeteredSource
 import dev.blazelight.p4oc.core.network.ConnectionManager
+import dev.blazelight.p4oc.core.network.DataSaverPolicy
 import dev.blazelight.p4oc.core.network.MdnsDiscoveryManager
+import dev.blazelight.p4oc.core.network.MutableDataSaverPolicy
+import dev.blazelight.p4oc.core.network.NetworkMeteredSource
 import dev.blazelight.p4oc.core.network.PtyWebSocketClient
 import dev.blazelight.p4oc.core.network.ServerConnectionRegistry
 import dev.blazelight.p4oc.core.notification.NotificationEventObserver
@@ -17,6 +23,9 @@ import dev.blazelight.p4oc.data.server.ActiveServerApiProvider
 import dev.blazelight.p4oc.data.server.StaleWorkspaceClientException
 import dev.blazelight.p4oc.data.session.SessionRepositoryImpl
 import dev.blazelight.p4oc.data.session.SessionRepositoryProvider
+import dev.blazelight.p4oc.data.vcs.WorkspaceChangesRepository
+import dev.blazelight.p4oc.data.workspace.SettingsUserWorkspaceRootsSource
+import dev.blazelight.p4oc.data.workspace.UserWorkspaceRootsSource
 import dev.blazelight.p4oc.ui.screens.chat.ChatViewModel
 import dev.blazelight.p4oc.ui.screens.chat.ModelSelectionCoordinator
 import dev.blazelight.p4oc.ui.screens.files.FilesViewModel
@@ -37,6 +46,9 @@ import dev.blazelight.p4oc.ui.screens.terminal.TerminalViewModel
 import dev.blazelight.p4oc.ui.tabs.TabManager
 import dev.blazelight.p4oc.ui.workspace.WorkspaceRepositoryOwner
 import dev.blazelight.p4oc.ui.workspace.WorkspaceViewModel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.serialization.json.Json
 import org.koin.android.ext.koin.androidContext
 import org.koin.core.module.dsl.viewModel
@@ -71,8 +83,8 @@ val appModule = module {
 }
 
 val networkModule = module {
-    // Mappers (stateless mappers are objects — only DI-dependent ones registered here)
-    single { MessageMapper(get()) }
+    // Mappers
+    single { MessageMapper() }
     single { EventMapper(get(), get()) }
 
     // Network
@@ -81,25 +93,41 @@ val networkModule = module {
     single {
         ServerConnectionRegistry(
             settingsDataStore = get(),
-            connectionManagerFactory = { ConnectionManager(get(), get(), get()) },
+            connectionManagerFactory = { _, generationIssuer ->
+                ConnectionManager(
+                    json = get(),
+                    eventMapper = get(),
+                    settingsDataStore = get(),
+                    generationIssuer = generationIssuer,
+                )
+            },
         )
     }
     single<ActiveServerApiProvider> {
-        val registry: ServerConnectionRegistry = get()
-        ActiveServerApiProvider { serverRef, generation ->
-            val activeGeneration = registry.generation(serverRef)
-            if (activeGeneration != generation) {
-                throw StaleWorkspaceClientException(
-                    "Workspace generation ${generation.value} does not match server " +
-                        "${serverRef.endpointKey} generation ${activeGeneration?.value ?: "<none>"}",
-                )
-            }
-            registry.api(serverRef) ?: throw StaleWorkspaceClientException(
-                "No connected API for workspace server ${serverRef.endpointKey} generation=${generation.value}",
-            )
-        }
+        activeServerApiProvider(get())
     }
-    single { SessionRepositoryProvider(get(), get(), get()) }
+    single<UserWorkspaceRootsSource> { SettingsUserWorkspaceRootsSource(get()) }
+    single<ForegroundState> { MutableForegroundState() }
+    single<NetworkMeteredSource> { AndroidNetworkMeteredSource(androidContext()) }
+    single<DataSaverPolicy> {
+        MutableDataSaverPolicy(
+            enabled = get<SettingsDataStore>().dataSaverEnabled,
+            metered = get<NetworkMeteredSource>().metered,
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+        )
+    }
+    single {
+        SessionRepositoryProvider(
+            get(),
+            get(),
+            get(),
+            userWorkspaceRoots = get(),
+            json = get(),
+            foregroundState = get(),
+            incrementalMessages = true,
+            dataSaverPolicy = get(),
+        )
+    }
 }
 
 val viewModelModule = module {
@@ -151,7 +179,14 @@ val viewModelModule = module {
     viewModel { params ->
         SessionListViewModel(params.get<SessionRepositoryImpl>(), get<SavedStateHandle>())
     }
-    viewModel { params -> FilesViewModel(params.get<FileRepository>(), params.get(), get<SavedStateHandle>()) }
+    viewModel { params ->
+        FilesViewModel(
+            fileRepository = params.get<FileRepository>(),
+            workspaceChangesRepository = params.get<WorkspaceChangesRepository>(),
+            uploadCoordinator = params.get(),
+            savedStateHandle = get<SavedStateHandle>(),
+        )
+    }
     viewModel { params ->
         val owner = params.get<WorkspaceRepositoryOwner>()
         TerminalViewModel(
@@ -169,3 +204,10 @@ val allModules = listOf(
     networkModule,
     viewModelModule
 )
+
+internal fun activeServerApiProvider(registry: ServerConnectionRegistry): ActiveServerApiProvider =
+    ActiveServerApiProvider { serverRef, generation ->
+        registry.api(serverRef, generation) ?: throw StaleWorkspaceClientException(
+            "No connected API for workspace server ${serverRef.endpointKey} generation=${generation.value}",
+        )
+    }

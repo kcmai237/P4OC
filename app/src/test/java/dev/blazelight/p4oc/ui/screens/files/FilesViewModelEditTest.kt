@@ -10,6 +10,7 @@ import dev.blazelight.p4oc.data.files.FileUploadResult
 import dev.blazelight.p4oc.data.files.FileWriteRequest
 import dev.blazelight.p4oc.data.files.FileWriteResult
 import dev.blazelight.p4oc.domain.model.FileContent
+import dev.blazelight.p4oc.domain.model.FileNode
 import dev.blazelight.p4oc.domain.model.Symbol
 import dev.blazelight.p4oc.ui.screens.files.upload.UploadCoordinator
 import kotlinx.coroutines.CoroutineScope
@@ -44,7 +45,7 @@ class FilesViewModelEditTest {
     @Test
     fun loadFileContent_initialisesEditBaseline() = runTest {
         val repo = FakeRepo(content = "hello\nworld", hash = "baseline")
-        val vm = FilesViewModel(repo, testUploadCoordinator(repo))
+        val vm = viewModel(repo)
         vm.loadFileContent("a.txt")
         val edit = vm.editState.value
         assertEquals("a.txt", edit.path)
@@ -57,7 +58,7 @@ class FilesViewModelEditTest {
     @Test
     fun onEditorTextChange_marksDirtyAndPreservesOriginal() = runTest {
         val repo = FakeRepo(content = "first")
-        val vm = FilesViewModel(repo, testUploadCoordinator(repo))
+        val vm = viewModel(repo)
         vm.loadFileContent("x")
         vm.onEditorTextChange("first edited")
         val edit = vm.editState.value
@@ -69,7 +70,7 @@ class FilesViewModelEditTest {
     @Test
     fun confirmSave_okClearsDirtyAndUpdatesOriginalAndReadView() = runTest {
         val repo = FakeRepo(content = "v1", hash = "baseline")
-        val vm = FilesViewModel(repo, testUploadCoordinator(repo))
+        val vm = viewModel(repo)
         vm.loadFileContent("p")
         vm.onEditorTextChange("v2")
         vm.requestSave()
@@ -89,7 +90,7 @@ class FilesViewModelEditTest {
     @Test
     fun overwriteAnyway_sendsNullExpectedHashEvenIfBaselinePresent() = runTest {
         val repo = FakeRepo(content = "v1", hash = "baseline")
-        val vm = FilesViewModel(repo, testUploadCoordinator(repo))
+        val vm = viewModel(repo)
         vm.loadFileContent("p")
         vm.onEditorTextChange("v2")
         vm.overwriteAnyway()
@@ -100,7 +101,7 @@ class FilesViewModelEditTest {
     @Test
     fun confirmSave_conflictRoutesToConflictState() = runTest {
         val repo = FakeRepo(content = "v1", writeResult = FileOperationResult.Conflict("stale", currentHash = "abc"))
-        val vm = FilesViewModel(repo, testUploadCoordinator(repo))
+        val vm = viewModel(repo)
         vm.loadFileContent("p")
         vm.onEditorTextChange("v2")
         vm.requestSave()
@@ -113,9 +114,63 @@ class FilesViewModelEditTest {
     }
 
     @Test
+    fun conflictReloadReplacesDirtyBufferWithServerVersion() = runTest {
+        val repo = FakeRepo(
+            content = "original",
+            hash = "old-hash",
+            writeResult = FileOperationResult.Conflict("stale", currentHash = "new-hash"),
+        )
+        val vm = viewModel(repo)
+        vm.loadFileContent("p")
+        vm.onEditorTextChange("local edits")
+        vm.requestSave()
+        vm.confirmSave()
+        assertNotNull(vm.editState.value.conflict)
+
+        repo.content = "server edits"
+        repo.hash = "new-hash"
+        vm.reloadFromServer()
+
+        val edit = vm.editState.value
+        assertEquals("server edits", vm.uiState.value.fileContent)
+        assertEquals("server edits", edit.originalContent)
+        assertEquals("server edits", edit.currentContent)
+        assertEquals("new-hash", edit.baselineHash)
+        assertFalse(edit.isDirty)
+        assertNull(edit.conflict)
+    }
+
+    @Test
+    fun failedConflictReloadPreservesDirtyBufferForRetry() = runTest {
+        val repo = FakeRepo(
+            content = "original",
+            hash = "old-hash",
+            writeResult = FileOperationResult.Conflict("stale", currentHash = "new-hash"),
+        )
+        val vm = viewModel(repo)
+        vm.loadFileContent("p")
+        vm.onEditorTextChange("local edits")
+        vm.requestSave()
+        vm.confirmSave()
+
+        repo.readError = "offline"
+        vm.reloadFromServer()
+
+        assertEquals("offline", vm.uiState.value.error)
+        assertTrue(vm.editState.value.isDirty)
+        assertEquals("local edits", vm.editState.value.currentContent)
+        assertEquals("old-hash", vm.editState.value.baselineHash)
+
+        repo.readError = null
+        vm.loadFileContent("p")
+        assertEquals("local edits", vm.editState.value.currentContent)
+        assertTrue(vm.editState.value.isDirty)
+    }
+
+    @Test
     fun discardEdits_resetsBufferAndBumpsGeneration() = runTest {
         val repo = FakeRepo(content = "orig")
-        val vm = FilesViewModel(repo, testUploadCoordinator(repo))
+        val vm = viewModel(repo)
         vm.loadFileContent("p")
         val gen0 = vm.editState.value.contentGeneration
         vm.onEditorTextChange("dirty")
@@ -129,7 +184,7 @@ class FilesViewModelEditTest {
     @Test
     fun requestSaveWithoutChanges_isNoOp() = runTest {
         val repo = FakeRepo(content = "same")
-        val vm = FilesViewModel(repo, testUploadCoordinator(repo))
+        val vm = viewModel(repo)
         vm.loadFileContent("p")
         vm.requestSave()
         assertNull(vm.editState.value.pendingSavePreview)
@@ -138,7 +193,7 @@ class FilesViewModelEditTest {
     @Test
     fun readOnlyCapability_blocksSavePreviewAndWrite() = runTest {
         val repo = FakeRepo(content = "v1", canWrite = false)
-        val vm = FilesViewModel(repo, testUploadCoordinator(repo))
+        val vm = viewModel(repo)
         vm.loadFileContent("p")
         vm.onEditorTextChange("v2")
 
@@ -155,7 +210,7 @@ class FilesViewModelEditTest {
     @Test
     fun writableCapability_preservesSaveFlow() = runTest {
         val repo = FakeRepo(content = "v1", canWrite = true)
-        val vm = FilesViewModel(repo, testUploadCoordinator(repo))
+        val vm = viewModel(repo)
         vm.loadFileContent("p")
         vm.onEditorTextChange("v2")
 
@@ -171,12 +226,12 @@ class FilesViewModelEditTest {
     fun recreateWithSameSavedStateHandle_restoresDirtyEditBuffer() = runTest {
         val savedStateHandle = SavedStateHandle()
         val repo = FakeRepo(content = "original", hash = "hash-1")
-        val first = FilesViewModel(repo, testUploadCoordinator(repo), savedStateHandle)
+        val first = viewModel(repo, savedStateHandle)
         first.loadFileContent("src/App.kt")
 
         first.onEditorTextChange("changed")
 
-        val recreated = FilesViewModel(repo, testUploadCoordinator(repo), savedStateHandle)
+        val recreated = viewModel(repo, savedStateHandle)
         val edit = recreated.editState.value
 
         assertEquals("src/App.kt", edit.path)
@@ -192,12 +247,12 @@ class FilesViewModelEditTest {
         val original = "o"
         val current = "c".repeat(MAX_SAVED_EDIT_CONTENT_CHARS - original.length)
         val repo = FakeRepo(content = original, hash = "hash-at-limit")
-        val vm = FilesViewModel(repo, testUploadCoordinator(repo), savedStateHandle)
+        val vm = viewModel(repo, savedStateHandle)
         vm.loadFileContent("at-limit.txt")
 
         vm.onEditorTextChange(current)
 
-        val restored = FilesViewModel(repo, testUploadCoordinator(repo), savedStateHandle).editState.value
+        val restored = viewModel(repo, savedStateHandle).editState.value
         assertEquals("at-limit.txt", restored.path)
         assertEquals(original, restored.originalContent)
         assertEquals(current, restored.currentContent)
@@ -208,7 +263,7 @@ class FilesViewModelEditTest {
     fun editSnapshot_overCombinedCharacterCeilingRemovesEveryPersistedEditKey() = runTest {
         val savedStateHandle = SavedStateHandle()
         val repo = FakeRepo(content = "o", hash = "oversized-hash")
-        val vm = FilesViewModel(repo, testUploadCoordinator(repo), savedStateHandle)
+        val vm = viewModel(repo, savedStateHandle)
         vm.loadFileContent("oversized.txt")
 
         vm.onEditorTextChange("c".repeat(MAX_SAVED_EDIT_CONTENT_CHARS))
@@ -225,13 +280,13 @@ class FilesViewModelEditTest {
     fun editSnapshot_shrinkingAfterOversizePersistsCompleteSnapshotAgain() = runTest {
         val savedStateHandle = SavedStateHandle()
         val repo = FakeRepo(content = "original", hash = "hash-after-shrink")
-        val vm = FilesViewModel(repo, testUploadCoordinator(repo), savedStateHandle)
+        val vm = viewModel(repo, savedStateHandle)
         vm.loadFileContent("shrunk.txt")
         vm.onEditorTextChange("x".repeat(MAX_SAVED_EDIT_CONTENT_CHARS))
 
         vm.onEditorTextChange("small again")
 
-        val restored = FilesViewModel(repo, testUploadCoordinator(repo), savedStateHandle).editState.value
+        val restored = viewModel(repo, savedStateHandle).editState.value
         assertEquals("shrunk.txt", restored.path)
         assertEquals("original", restored.originalContent)
         assertEquals("small again", restored.currentContent)
@@ -245,11 +300,11 @@ class FilesViewModelEditTest {
         val original = "alpha\u0000\uD83D\uDE80\nline two"
         val current = "alpha\u0000\uD83D\uDE80\nline two edited"
         val repo = FakeRepo(content = original, hash = "exact-hash")
-        val vm = FilesViewModel(repo, testUploadCoordinator(repo), savedStateHandle)
+        val vm = viewModel(repo, savedStateHandle)
         vm.loadFileContent("exact.txt")
         vm.onEditorTextChange(current)
 
-        val restored = FilesViewModel(repo, testUploadCoordinator(repo), savedStateHandle).editState.value
+        val restored = viewModel(repo, savedStateHandle).editState.value
 
         assertEquals("exact.txt", restored.path)
         assertEquals(original, restored.originalContent)
@@ -262,11 +317,11 @@ class FilesViewModelEditTest {
     fun loadFileContent_preservesRestoredDirtyBufferForSamePath() = runTest {
         val savedStateHandle = SavedStateHandle()
         val repo = FakeRepo(content = "original", hash = "hash-1")
-        val first = FilesViewModel(repo, testUploadCoordinator(repo), savedStateHandle)
+        val first = viewModel(repo, savedStateHandle)
         first.loadFileContent("src/App.kt")
         first.onEditorTextChange("changed")
 
-        val recreated = FilesViewModel(repo, testUploadCoordinator(repo), savedStateHandle)
+        val recreated = viewModel(repo, savedStateHandle)
         recreated.loadFileContent("src/App.kt")
 
         assertEquals("changed", recreated.editState.value.currentContent)
@@ -277,7 +332,7 @@ class FilesViewModelEditTest {
     fun recreateWithSameSavedStateHandle_restoresPathStackAndFilters() = runTest {
         val savedStateHandle = SavedStateHandle()
         val repo = FakeRepo(content = "")
-        val first = FilesViewModel(repo, testUploadCoordinator(repo), savedStateHandle)
+        val first = viewModel(repo, savedStateHandle)
 
         first.navigateTo("src")
         first.navigateTo("src/main")
@@ -286,10 +341,10 @@ class FilesViewModelEditTest {
         first.setSymbolMode(true)
         first.updateSymbolQuery("Main")
 
-        val recreated = FilesViewModel(repo, testUploadCoordinator(repo), savedStateHandle)
+        val recreated = viewModel(repo, savedStateHandle)
 
         assertEquals("src/main", recreated.uiState.value.currentPath)
-        assertTrue(recreated.uiState.value.isSearchActive)
+        assertFalse(recreated.uiState.value.isSearchActive)
         assertEquals("view", recreated.uiState.value.searchQuery)
         assertTrue(recreated.uiState.value.isSymbolMode)
         assertEquals("Main", recreated.uiState.value.symbolQuery)
@@ -304,7 +359,7 @@ class FilesViewModelEditTest {
     fun explorerQueriesAreBoundedBeforeStateAndPersistence() = runTest {
         val savedStateHandle = SavedStateHandle()
         val repo = FakeRepo(content = "")
-        val viewModel = FilesViewModel(repo, testUploadCoordinator(repo), savedStateHandle)
+        val viewModel = viewModel(repo, savedStateHandle)
         val oversized = "x".repeat(2_000)
 
         viewModel.updateSearchQuery(oversized)
@@ -320,7 +375,7 @@ class FilesViewModelEditTest {
     fun persistedNavigationHistoryIsBounded() = runTest {
         val savedStateHandle = SavedStateHandle()
         val repo = FakeRepo(content = "")
-        val viewModel = FilesViewModel(repo, testUploadCoordinator(repo), savedStateHandle)
+        val viewModel = viewModel(repo, savedStateHandle)
 
         repeat(200) { index -> viewModel.navigateTo("path-$index") }
 
@@ -337,7 +392,7 @@ class FilesViewModelEditTest {
         )
         val repo = FakeRepo(content = "", failedPaths = setOf("missing"))
 
-        val vm = FilesViewModel(repo, testUploadCoordinator(repo), savedStateHandle)
+        val vm = viewModel(repo, savedStateHandle)
 
         assertEquals("", vm.uiState.value.currentPath)
         assertEquals("missing path", vm.uiState.value.pathRestoreError)
@@ -347,7 +402,7 @@ class FilesViewModelEditTest {
     fun initialRootLoadFailureIsExposedInsteadOfLookingEmpty() = runTest {
         val repo = FakeRepo(content = "", failedPaths = setOf(""))
 
-        val vm = FilesViewModel(repo, testUploadCoordinator(repo))
+        val vm = viewModel(repo)
 
         assertFalse(vm.uiState.value.isLoading)
         assertEquals("missing path", vm.uiState.value.error)
@@ -355,13 +410,14 @@ class FilesViewModelEditTest {
     }
 
     private class FakeRepo(
-        val content: String,
-        val hash: String? = null,
+        var content: String,
+        var hash: String? = null,
         val failedPaths: Set<String> = emptySet(),
         val canWrite: Boolean = true,
         val writeResult: FileOperationResult<FileWriteResult> =
             FileOperationResult.Ok(FileWriteResult("p", hash = null)),
     ) : FileRepository {
+        var readError: String? = null
         val writes = mutableListOf<FileWriteRequest>()
         val symbolQueries = mutableListOf<String>()
 
@@ -373,7 +429,11 @@ class FilesViewModelEditTest {
             }
 
         override suspend fun readFile(path: String): FileOperationResult<FileContent> =
-            FileOperationResult.Ok(FileContent(content = content, hash = hash))
+            readError?.let { FileOperationResult.Failed(it) }
+                ?: FileOperationResult.Ok(FileContent(content = content, hash = hash))
+
+        override suspend fun searchFiles(query: String): FileOperationResult<List<FileNode>> =
+            FileOperationResult.Ok(emptyList())
 
         override suspend fun searchSymbols(query: String): FileOperationResult<List<Symbol>> {
             symbolQueries += query
@@ -399,6 +459,16 @@ class FilesViewModelEditTest {
 
         override suspend fun capabilities(): FileCapabilities = FileCapabilities(canWrite = canWrite)
     }
+
+    private fun viewModel(
+        repository: FileRepository,
+        savedStateHandle: SavedStateHandle = SavedStateHandle(),
+    ) = FilesViewModel(
+        fileRepository = repository,
+        workspaceChangesRepository = NoOpWorkspaceChangesRepository,
+        uploadCoordinator = testUploadCoordinator(repository),
+        savedStateHandle = savedStateHandle,
+    )
 
     private fun testUploadCoordinator(repo: FileRepository) = UploadCoordinator(
         scope = CoroutineScope(Dispatchers.Main),

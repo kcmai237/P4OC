@@ -1,6 +1,9 @@
 package dev.blazelight.p4oc.ui.tabs
 
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -13,14 +16,23 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import dev.blazelight.p4oc.R
 import dev.blazelight.p4oc.domain.model.SessionConnectionState
 import dev.blazelight.p4oc.domain.model.SessionPresence
@@ -29,12 +41,15 @@ import dev.blazelight.p4oc.ui.components.status.SessionStatusDot
 import dev.blazelight.p4oc.ui.theme.LocalOpenCodeTheme
 import dev.blazelight.p4oc.ui.theme.Sizing
 import dev.blazelight.p4oc.ui.theme.Spacing
+import dev.blazelight.p4oc.ui.workspace.WorkspaceLabelIndex
 
 /**
- * Tab bar showing all open tabs with indicators and close buttons.
+ * Tab bar showing all open tabs with indicators. Closeable tabs carry a compact trailing
+ * close glyph; long press on the tab body remains an additional close gesture.
  * Reuses visual language from SessionStatusBar.
  */
 private data class TabIndicatorState(
+    val id: String,
     val title: String,
     val icon: ImageVector,
     val serverBadge: String?,
@@ -60,6 +75,10 @@ fun TabBar(
 ) {
     val theme = LocalOpenCodeTheme.current
     val listState = rememberLazyListState()
+    val newWorkLabel = stringResource(R.string.cd_new_work)
+    val labelStyle = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace)
+    val addStyle = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace)
+    val tabBarHeight = rememberTabBarHeight(labelStyle, addStyle)
 
     // Home is pinned outside the scrolling work-tab list.
     LaunchedEffect(activeTabId, tabs) {
@@ -71,95 +90,132 @@ fun TabBar(
 
     Surface(
         modifier = modifier.fillMaxWidth().testTag("tab_bar"),
-        color = theme.background,
+        color = theme.backgroundPanel,
         tonalElevation = Spacing.none
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(Sizing.minTouchTarget)
-                .padding(horizontal = Spacing.xs),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            tabs.firstOrNull { it.isPinnedHome }?.let { home ->
-                tabIndicator(
-                    state = TabIndicatorState(
-                        title = tabTitles.getValue(home.id),
-                        icon = tabIcons.getValue(home.id),
-                        serverBadge = null,
-                        accessibilityLabel = tabTitles.getValue(home.id),
-                        connectionState = null,
-                        isActive = home.id == activeTabId,
-                        closeable = false,
-                        onClick = { onTabClick(home.id) },
-                        onClose = {},
-                    ),
-                    modifier = Modifier.testTag("tab_home"),
-                )
-            }
-
-            LazyRow(
-                state = listState,
-                modifier = Modifier.weight(1f),
-                horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(tabBarHeight),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                items(
-                    items = tabs.filterNot { it.isPinnedHome },
-                    key = { it.id },
-                ) { tab ->
-                    val title = tabTitles.getValue(tab.id)
-                    val workspaceIdentity = when (val key = tab.workspaceKey) {
-                        is WorkspaceKey.Directory -> key.value
-                        WorkspaceKey.Global -> stringResource(R.string.tab_workspace_global)
-                        is WorkspaceKey.SessionScoped -> stringResource(
-                            R.string.tab_accessibility_session_context,
-                            key.sessionId.value,
-                        )
-                        null -> null
-                    }
-                    val serverIdentity = tab.serverRef?.displayName
-                    val accessibilityLabel = when {
-                        serverIdentity != null && workspaceIdentity != null -> stringResource(
-                            R.string.tab_accessibility_identity,
-                            serverIdentity,
-                            workspaceIdentity,
-                            title,
-                        )
-                        else -> listOfNotNull(serverIdentity, workspaceIdentity, title).joinToString(", ")
-                    }
-
+                tabs.firstOrNull { it.isPinnedHome }?.let { home ->
                     tabIndicator(
+                        height = tabBarHeight,
+                        labelStyle = labelStyle,
                         state = TabIndicatorState(
-                            title = title,
-                            icon = tabIcons.getValue(tab.id),
-                            serverBadge = tab.serverRef?.badgeLabel,
-                            accessibilityLabel = accessibilityLabel,
-                            connectionState = tabConnectionStates[tab.id],
-                            isActive = tab.id == activeTabId,
-                            onClick = { onTabClick(tab.id) },
-                            onClose = { onTabClose(tab.id) },
+                            id = home.id,
+                            title = tabTitles.getValue(home.id),
+                            icon = tabIcons.getValue(home.id),
+                            serverBadge = null,
+                            accessibilityLabel = tabTitles.getValue(home.id),
+                            connectionState = null,
+                            isActive = home.id == activeTabId,
+                            closeable = false,
+                            onClick = { onTabClick(home.id) },
+                            onClose = {},
                         ),
-                        modifier = Modifier.testTag("work_tab_${tab.id}"),
+                        modifier = Modifier.testTag("tab_home"),
+                    )
+                }
+
+                LazyRow(
+                    state = listState,
+                    modifier = Modifier.weight(1f),
+                    horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    items(
+                        items = tabs.filterNot { it.isPinnedHome },
+                        key = { it.id },
+                    ) { tab ->
+                        val title = tabTitles.getValue(tab.id)
+                        val workspaceIdentity = when (val key = tab.workspaceKey) {
+                            is WorkspaceKey.Directory -> key.value
+                            WorkspaceKey.Global -> stringResource(R.string.tab_workspace_global)
+                            is WorkspaceKey.SessionScoped -> stringResource(
+                                R.string.tab_accessibility_session_context,
+                                key.sessionId.value,
+                            )
+                            null -> null
+                        }
+                        val serverIdentity = tab.serverRef?.displayName
+                        val accessibilityLabel = when {
+                            serverIdentity != null && workspaceIdentity != null -> stringResource(
+                                R.string.tab_accessibility_identity,
+                                serverIdentity,
+                                workspaceIdentity,
+                                title,
+                            )
+                            else -> listOfNotNull(serverIdentity, workspaceIdentity, title).joinToString(", ")
+                        }
+
+                        tabIndicator(
+                            height = tabBarHeight,
+                            labelStyle = labelStyle,
+                            state = TabIndicatorState(
+                                id = tab.id,
+                                title = title,
+                                icon = tabIcons.getValue(tab.id),
+                                serverBadge = tab.serverRef?.badgeLabel,
+                                accessibilityLabel = accessibilityLabel,
+                                connectionState = tabConnectionStates[tab.id],
+                                isActive = tab.id == activeTabId,
+                                onClick = { onTabClick(tab.id) },
+                                onClose = { onTabClose(tab.id) },
+                            ),
+                            modifier = Modifier.testTag("work_tab_${tab.id}"),
+                        )
+                    }
+                }
+
+                // Add button — mono glyph with a left divider (design)
+                VerticalDivider(
+                    modifier = Modifier.height(tabBarHeight),
+                    color = theme.border,
+                    thickness = Sizing.strokeThin,
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .clickable(onClick = onAddClick, role = Role.Button)
+                        .padding(horizontal = Spacing.lg)
+                        .semantics { contentDescription = newWorkLabel }
+                        .testTag("tab_bar_add_button"),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "+",
+                        style = addStyle,
+                        color = theme.textMuted,
                     )
                 }
             }
+            HorizontalDivider(color = theme.border, thickness = Sizing.strokeThin)
+        }
+    }
+}
 
-            // Add button
-            IconButton(
-                onClick = onAddClick,
-                modifier = Modifier
-                    .minimumInteractiveComponentSize()
-                    .size(Sizing.iconLg)
-                    .testTag("tab_bar_add_button")
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Add,
-                    contentDescription = stringResource(R.string.cd_new_work),
-                    modifier = Modifier.size(Sizing.iconSm),
-                    tint = theme.textMuted
-                )
-            }
+/**
+ * Tab strip height: the design's [Sizing.tabBarHeight] at default text sizes, growing with the
+ * tab label and "+" glyph line heights (system font scale) so they never clip.
+ */
+@Composable
+private fun rememberTabBarHeight(labelStyle: TextStyle, addStyle: TextStyle): Dp {
+    val textMeasurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    return remember(textMeasurer, density, labelStyle, addStyle) {
+        // Single-line height depends on the style's font metrics/line height, not the characters.
+        val labelHeight = textMeasurer.measure(text = "Ag", style = labelStyle).size.height
+        val addHeight = textMeasurer.measure(text = "+", style = addStyle).size.height
+        with(density) {
+            maxOf(
+                Sizing.tabBarHeight,
+                // Active-tab top strip + breathing room above and below the label.
+                labelHeight.toDp() + Sizing.strokeThick + Spacing.xs * 2,
+                addHeight.toDp() + Spacing.xs * 2,
+            )
         }
     }
 }
@@ -170,6 +226,8 @@ fun TabBar(
 @Composable
 private fun tabIndicator(
     state: TabIndicatorState,
+    height: Dp,
+    labelStyle: TextStyle,
     modifier: Modifier = Modifier,
 ) {
     val theme = LocalOpenCodeTheme.current
@@ -177,40 +235,79 @@ private fun tabIndicator(
     val backgroundColor = when {
         needsAttention && !state.isActive -> theme.warning.copy(alpha = 0.15f)
         state.isActive -> theme.backgroundElement
-        else -> theme.background
+        else -> Color.Transparent
     }
-    Box(
+    // Active tab gets a 2px primary top-border strip — the design's key tab signature.
+    val topStripColor = if (state.isActive) theme.primary else Color.Transparent
+    Column(
         modifier = modifier
-            .minimumInteractiveComponentSize()
-            .height(Sizing.tabHeight)
-            .semantics {
-                contentDescription = state.accessibilityLabel
-                selected = state.isActive
-            }
-            .clickable(onClick = state.onClick, role = Role.Tab),
-        contentAlignment = Alignment.Center,
+            .height(height)
+            .background(backgroundColor)
+            .drawBehind {
+                drawRect(
+                    color = topStripColor,
+                    size = androidx.compose.ui.geometry.Size(
+                        width = size.width,
+                        height = Sizing.strokeThick.toPx(),
+                    ),
+                )
+            },
     ) {
-        Surface(
-            modifier = Modifier.height(Sizing.tabHeight),
-            color = backgroundColor,
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .padding(top = Sizing.strokeThick),
+            contentAlignment = Alignment.Center,
         ) {
-            tabIndicatorRow(state = state, needsAttention = needsAttention)
+            tabIndicatorRow(
+                state = state,
+                needsAttention = needsAttention,
+                labelStyle = labelStyle,
+            )
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun tabIndicatorRow(state: TabIndicatorState, needsAttention: Boolean) {
+private fun tabIndicatorRow(
+    state: TabIndicatorState,
+    needsAttention: Boolean,
+    labelStyle: TextStyle,
+) {
     val theme = LocalOpenCodeTheme.current
+    val haptic = LocalHapticFeedback.current
+    val closeLabel = stringResource(R.string.cd_close_tab)
+    val selectModifier = if (state.closeable) {
+        Modifier.combinedClickable(
+            role = Role.Tab,
+            onClick = state.onClick,
+            onLongClickLabel = closeLabel,
+            onLongClick = {
+                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                state.onClose()
+            },
+        )
+    } else {
+        Modifier.clickable(onClick = state.onClick, role = Role.Tab)
+    }
     Row(
-        modifier = Modifier.padding(horizontal = Spacing.xs),
+        modifier = Modifier
+            .fillMaxHeight()
+            .then(selectModifier)
+            .semantics {
+                contentDescription = state.accessibilityLabel
+                selected = state.isActive
+            }
+            .testTag(if (state.closeable) "work_tab_${state.id}_body" else "tab_home_body")
+            .padding(start = Spacing.md, end = if (state.closeable) Spacing.xxs else Spacing.md),
+        horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(Spacing.xxs),
     ) {
         tabIndicatorIcon(state)
         Text(
             text = state.title,
-            style = MaterialTheme.typography.labelSmall,
+            style = labelStyle,
             color = when {
                 needsAttention -> theme.warning
                 state.isActive -> theme.text
@@ -220,17 +317,31 @@ private fun tabIndicatorRow(state: TabIndicatorState, needsAttention: Boolean) {
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.widthIn(max = Sizing.panelWidthSm),
         )
-        if (state.isActive && state.closeable) {
-            Icon(
-                imageVector = Icons.Default.Close,
-                contentDescription = stringResource(R.string.cd_close_tab),
-                modifier = Modifier
-                    .size(Sizing.minTouchTarget)
-                    .clickable(onClick = state.onClose, role = Role.Button)
-                    .padding((Sizing.minTouchTarget - Sizing.iconXs) / 2),
-                tint = theme.textMuted,
-            )
+        if (state.closeable) {
+            tabCloseTarget(state, closeLabel)
         }
+    }
+}
+
+@Composable
+private fun tabCloseTarget(state: TabIndicatorState, closeLabel: String) {
+    val theme = LocalOpenCodeTheme.current
+    // Own click target: closes without ever selecting the tab underneath.
+    Box(
+        modifier = Modifier
+            .fillMaxHeight()
+            .clickable(role = Role.Button, onClick = state.onClose)
+            .padding(horizontal = Spacing.sm)
+            .semantics { contentDescription = closeLabel }
+            .testTag("work_tab_${state.id}_close"),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = Icons.Default.Close,
+            contentDescription = null,
+            modifier = Modifier.size(Sizing.iconXs),
+            tint = if (state.isActive) theme.text else theme.textMuted,
+        )
     }
 }
 
@@ -300,14 +411,43 @@ fun rememberTabTitleLabels(): TabTitleLabels = TabTitleLabels(
     sessionWorkspace = stringResource(R.string.tab_workspace_session),
 )
 
-fun getTitleForTab(tab: TabInstance, labels: TabTitleLabels): String {
+fun getTitleForTab(tab: TabInstance, labels: TabTitleLabels, workspaceLabels: WorkspaceLabelIndex): String =
+    titleWithWorkspace(tab, labels, tabWorkspaceName(tab, labels, workspaceLabels))
+
+/**
+ * Titles for every tab. When open tabs on different servers share a workspace name, each of those
+ * titles also carries its server badge; the stored alias is unchanged.
+ */
+fun getTitlesForTabs(
+    tabs: List<TabInstance>,
+    labels: TabTitleLabels,
+    workspaceLabels: WorkspaceLabelIndex,
+): Map<String, String> {
+    val names = tabs.associate { it.id to tabWorkspaceName(it, labels, workspaceLabels) }
+    val ambiguous = tabs
+        .filter { !it.isPinnedHome && names[it.id] != null && it.serverRef != null }
+        .groupBy { names.getValue(it.id) }
+        .filterValues { group -> group.mapTo(HashSet()) { it.serverRef?.endpointKey }.size > 1 }
+        .keys
+    return tabs.associate { tab ->
+        val name = names[tab.id]
+        val badge = tab.serverRef?.badgeLabel
+        val shown = if (name != null && badge != null && name in ambiguous) "$name · $badge" else name
+        tab.id to titleWithWorkspace(tab, labels, shown)
+    }
+}
+
+private fun titleWithWorkspace(tab: TabInstance, labels: TabTitleLabels, workspaceName: String?): String {
     if (tab.isPinnedHome) return labels.home
     val objectTitle = when {
         tab.sessionId != null -> tab.sessionTitle?.takeIf { it.isNotBlank() } ?: labels.chat
         else -> getTitleForRoute(tab.startRoute, labels, workspaceKey = null)
     }
-    return withWorkspaceSuffix(objectTitle, tab.workspaceKey, labels)
+    return workspaceName?.let { "$objectTitle · $it" } ?: objectTitle
 }
+
+private fun tabWorkspaceName(tab: TabInstance, labels: TabTitleLabels, workspaceLabels: WorkspaceLabelIndex): String? =
+    workspaceLabels.primaryFor(tab.serverRef, tab.workspaceKey) ?: workspaceLabel(tab.workspaceKey, labels)
 
 fun getIconForTab(tab: TabInstance): ImageVector = when {
     tab.isPinnedHome -> Icons.Default.Home
@@ -343,7 +483,7 @@ private fun withWorkspaceSuffix(title: String, workspaceKey: WorkspaceKey?, labe
 }
 
 fun workspaceLabel(workspaceKey: WorkspaceKey?, labels: TabTitleLabels): String? = when (workspaceKey) {
-    is WorkspaceKey.Directory -> workspaceKey.value.trimEnd('/').substringAfterLast('/').ifBlank { workspaceKey.value }
+    is WorkspaceKey.Directory -> WorkspaceLabelIndex.Empty.directoryLabel(null, workspaceKey.value).primary
     WorkspaceKey.Global -> labels.globalWorkspace
     is WorkspaceKey.SessionScoped -> labels.sessionWorkspace
     null -> null

@@ -5,6 +5,7 @@
 
 package dev.blazelight.p4oc.ui.tabs
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -17,14 +18,17 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.PagerState
@@ -42,42 +46,52 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalResources
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import dev.blazelight.p4oc.R
 import dev.blazelight.p4oc.core.datastore.SavedServer
 import dev.blazelight.p4oc.core.datastore.SettingsDataStore
+import dev.blazelight.p4oc.core.lifecycle.ForegroundState
 import dev.blazelight.p4oc.core.log.AppLog
 import dev.blazelight.p4oc.core.network.ApiResult
 import dev.blazelight.p4oc.core.network.ConnectionState
@@ -95,24 +109,56 @@ import dev.blazelight.p4oc.domain.model.SessionStatus
 import dev.blazelight.p4oc.domain.server.ServerRef
 import dev.blazelight.p4oc.domain.server.WorkspaceKey
 import dev.blazelight.p4oc.domain.session.SessionId
+import dev.blazelight.p4oc.domain.workspace.ServerPath
+import dev.blazelight.p4oc.domain.workspace.UserWorkspaceState
 import dev.blazelight.p4oc.domain.workspace.Workspace
+import dev.blazelight.p4oc.domain.workspace.WorkspaceAttribution
+import dev.blazelight.p4oc.ui.components.status.connectionStatusColor
+import dev.blazelight.p4oc.ui.components.status.connectionStatusDescription
+import dev.blazelight.p4oc.ui.components.status.connectionStatusLabel
 import dev.blazelight.p4oc.ui.navigation.Screen
 import dev.blazelight.p4oc.ui.screens.home.HomeActions
+import dev.blazelight.p4oc.ui.screens.home.HomeSessionActions
 import dev.blazelight.p4oc.ui.screens.home.HomeSummaryBuilder
 import dev.blazelight.p4oc.ui.screens.home.HomeSummaryInput
+import dev.blazelight.p4oc.ui.screens.home.HomeWorkspaceActions
 import dev.blazelight.p4oc.ui.screens.home.ScopedHomeRepositoryState
+import dev.blazelight.p4oc.ui.screens.home.WorkspaceSummary
 import dev.blazelight.p4oc.ui.screens.home.homeScreen
 import dev.blazelight.p4oc.ui.theme.LocalOpenCodeTheme
+import dev.blazelight.p4oc.ui.theme.ProjectColors
 import dev.blazelight.p4oc.ui.theme.Sizing
 import dev.blazelight.p4oc.ui.theme.Spacing
-import dev.blazelight.p4oc.ui.theme.TuiShapes
+import dev.blazelight.p4oc.ui.workspace.AddWorkspaceRequest
+import dev.blazelight.p4oc.ui.workspace.AddWorkspaceServerOption
+import dev.blazelight.p4oc.ui.workspace.LocalWorkspaceLabels
+import dev.blazelight.p4oc.ui.workspace.WorkspaceActionHandlers
+import dev.blazelight.p4oc.ui.workspace.WorkspaceActionSubject
+import dev.blazelight.p4oc.ui.workspace.WorkspaceLabelIndex
 import dev.blazelight.p4oc.ui.workspace.WorkspaceRepositoryOwner
+import dev.blazelight.p4oc.ui.workspace.addWorkspaceSheet
+import dev.blazelight.p4oc.ui.workspace.rememberWorkspaceActionsState
+import dev.blazelight.p4oc.ui.workspace.workspaceActionGestures
+import dev.blazelight.p4oc.ui.workspace.workspaceActionMenu
+import dev.blazelight.p4oc.ui.workspace.workspaceClientDirectoryBrowser
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import org.koin.compose.koinInject
 
 private const val TAG = "MainTabScreen"
+
+private fun showMainTabMessage(scope: CoroutineScope, host: SnackbarHostState, message: String) {
+    scope.launch {
+        host.showSnackbar(message = message, duration = SnackbarDuration.Long, withDismissAction = true)
+    }
+}
+
+private fun mainTabMessenger(scope: CoroutineScope, host: SnackbarHostState): (String) -> Unit =
+    { message -> showMainTabMessage(scope, host, message) }
+
+private const val SELECTED_ROW_TINT = 0.12f
 
 private data class SavedServerView(
     val endpointKey: String,
@@ -125,6 +171,7 @@ private data class MainTabDeps(
     val settingsDataStore: SettingsDataStore,
     val serverConnectionRegistry: ServerConnectionRegistry,
     val sessionRepositoryProvider: SessionRepositoryProvider,
+    val foregroundState: ForegroundState,
     val coroutineScope: CoroutineScope,
 )
 
@@ -132,12 +179,70 @@ private class StartWorkUiState {
     var restoreError: String? by mutableStateOf(null)
     var startWorkContext: StartWorkContext? by mutableStateOf(null)
     var showStartWorkSheet: Boolean by mutableStateOf(false)
-    var showFilesTabPrompt: Boolean by mutableStateOf(false)
     var showStartWorkPicker: Boolean by mutableStateOf(false)
+    var pickerAction: StartWorkAction? by mutableStateOf(null)
     var homeDetailSelection: StartWorkSelection by mutableStateOf(StartWorkSelection.NeedsSelection)
     var pendingStartWork: Pair<StartWorkTarget, StartWorkAction>? by mutableStateOf(null)
-    var pickerSelectedEndpointKey: String? by mutableStateOf(null)
     var pickerSearchQuery: String by mutableStateOf("")
+
+    /** Open Add workspace sheet, if any. */
+    var addWorkspaceLaunch: AddWorkspaceLaunch? by mutableStateOf(null)
+
+    /** Servers the user has explicitly expanded/collapsed in the picker. */
+    val pickerExpandedServers: SnapshotStateMap<String, Boolean> = mutableStateMapOf()
+
+    /** Servers where the user tapped "show more" past the first page of workspaces. */
+    val pickerShowAllServers: SnapshotStateMap<String, Boolean> = mutableStateMapOf()
+}
+
+/** An Add workspace sheet opening; [fromPicker] continues the picker's pending action after adding. */
+private data class AddWorkspaceLaunch(
+    val request: AddWorkspaceRequest,
+    val fromPicker: Boolean,
+)
+
+private fun addWorkspaceRequest(
+    savedServers: List<SavedServer>,
+    connectionStates: Map<String, ConnectionState>,
+    server: ServerRef?,
+    prefilledPath: String?,
+): AddWorkspaceRequest = AddWorkspaceRequest(
+    servers = savedServers
+        .map { saved ->
+            AddWorkspaceServerOption(
+                server = ServerRef.fromEndpointKey(saved.endpointKey, saved.displayName),
+                connected = connectionStates[saved.endpointKey] is ConnectionState.Connected,
+            )
+        }
+        .sortedByDescending { it.connected },
+    preselectedEndpointKey = server?.endpointKey ?: savedServers.singleOrNull()?.endpointKey,
+    prefilledPath = prefilledPath,
+)
+
+@Composable
+private fun rememberWorkspaceManagementHost(
+    deps: MainTabDeps,
+    snackbarHostState: SnackbarHostState,
+    labels: WorkspaceLabelIndex,
+    userWorkspaces: UserWorkspaceState,
+): WorkspaceManagementHost {
+    val currentLabels by rememberUpdatedState(labels)
+    val currentUserWorkspaces by rememberUpdatedState(userWorkspaces)
+    val messages = WorkspaceManagementMessages(
+        pathCopied = stringResource(R.string.home_workspace_path_copied),
+        saveFailed = stringResource(R.string.home_workspace_save_failed),
+        aliasLimit = stringResource(R.string.home_workspace_alias_limit),
+    )
+    return remember(deps, snackbarHostState, messages) {
+        WorkspaceManagementHost(
+            settingsDataStore = deps.settingsDataStore,
+            scope = deps.coroutineScope,
+            labels = { currentLabels },
+            userWorkspaces = { currentUserWorkspaces },
+            showMessage = { message -> showMainTabMessage(deps.coroutineScope, snackbarHostState, message) },
+            messages = messages,
+        )
+    }
 }
 
 internal enum class PendingStartDisposition {
@@ -167,26 +272,35 @@ private val startWorkPickerSearch: @Composable (StartWorkUiState) -> Unit = { ui
         value = uiState.pickerSearchQuery,
         onValueChange = { uiState.pickerSearchQuery = it },
         singleLine = true,
-        textStyle = MaterialTheme.typography.bodyMedium.copy(color = theme.text),
-        cursorBrush = SolidColor(theme.accent),
+        textStyle = MaterialTheme.typography.labelMedium.copy(
+            color = theme.text,
+            fontFamily = FontFamily.Monospace,
+        ),
+        cursorBrush = SolidColor(theme.primary),
         modifier = Modifier
             .fillMaxWidth()
-            .border(Sizing.strokeThin, theme.border, RectangleShape)
+            .height(Sizing.textFieldHeightSm)
+            .background(theme.backgroundPanel, RectangleShape)
+            .border(Sizing.strokeMd, theme.borderSubtle, RectangleShape)
             .semantics { contentDescription = searchDescription }
             .testTag("start_work_search_field"),
         decorationBox = { field ->
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = Spacing.sm, vertical = Spacing.xs),
+                Modifier.fillMaxSize().padding(horizontal = Spacing.sm),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("/", style = MaterialTheme.typography.labelMedium, color = theme.textMuted)
+                Text(
+                    "/",
+                    style = MaterialTheme.typography.labelMedium.copy(fontFamily = FontFamily.Monospace),
+                    color = theme.primary,
+                )
                 Spacer(Modifier.width(Spacing.xs))
                 Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
                     field()
                     if (uiState.pickerSearchQuery.isEmpty()) {
                         Text(
                             stringResource(R.string.start_work_filter_workspaces),
-                            style = MaterialTheme.typography.labelMedium,
+                            style = MaterialTheme.typography.labelMedium.copy(fontFamily = FontFamily.Monospace),
                             color = theme.textMuted,
                             maxLines = 1,
                         )
@@ -197,98 +311,296 @@ private val startWorkPickerSearch: @Composable (StartWorkUiState) -> Unit = { ui
     )
 }
 
-private val startWorkServerRail: @Composable (
-    List<StartWorkPickerGroup>,
-    StartWorkPickerGroup?,
-    StartWorkUiState,
-) -> Unit = { groups, selectedGroup, uiState ->
+/**
+ * Collapsible `▸ server ─ N workspaces` header. Collapsing keeps a server with a long workspace
+ * list from burying the others, and the count stays visible while collapsed.
+ */
+@Composable
+private fun startWorkServerHeader(
+    row: StartWorkPickerRow,
+    connectionState: ConnectionState?,
+    onToggle: () -> Unit,
+) {
     val theme = LocalOpenCodeTheme.current
     val resources = LocalResources.current
-    LazyRow(horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
-        items(groups, key = { it.server.endpointKey }) { group ->
-            val selected = group.server.endpointKey == selectedGroup?.server?.endpointKey
-            Surface(
-                color = theme.backgroundPanel,
-                shape = RectangleShape,
-                modifier = Modifier
-                    .width(Sizing.serverFilterCardWidth)
-                    .then(if (selected) Modifier.border(Sizing.strokeMd, theme.primary) else Modifier)
-                    .clickable(role = Role.Tab) {
-                        uiState.pickerSelectedEndpointKey = group.server.endpointKey
-                        uiState.pickerSearchQuery = ""
-                    }
-                    .semantics {
-                        contentDescription = resources.getString(
-                            R.string.start_work_server_workspaces,
-                            group.server.displayName,
-                            group.targets.size - 1,
-                        )
-                        this.selected = selected
-                    }
-                    .testTag("start_work_server_${group.server.endpointKey}"),
+    val server = row.group.server
+    val workspaceCount = row.matchCount
+    val statusDescription = connectionStatusDescription(connectionState)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = Sizing.minTouchTarget)
+            .background(theme.backgroundPanel, RectangleShape)
+            .clickable(role = Role.Button, onClick = onToggle)
+            .padding(horizontal = Spacing.sm, vertical = Spacing.xs)
+            .semantics {
+                contentDescription = resources.getString(
+                    R.string.start_work_server_workspaces,
+                    server.displayName,
+                    workspaceCount,
+                ) + ", $statusDescription"
+                selected = row.expanded
+            }
+            .testTag("start_work_server_${server.endpointKey}"),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
+    ) {
+        Text(
+            text = if (row.expanded) "▾" else "▸",
+            style = MaterialTheme.typography.labelMedium.copy(fontFamily = FontFamily.Monospace),
+            color = theme.secondary,
+        )
+        Box(
+            Modifier
+                .size(Sizing.indicatorDot)
+                .background(connectionStatusColor(connectionState), RectangleShape),
+        )
+        Text(
+            server.displayName,
+            style = MaterialTheme.typography.labelMedium.copy(fontFamily = FontFamily.Monospace),
+            fontWeight = FontWeight.SemiBold,
+            color = theme.text,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            text = pluralWorkspaceCount(workspaceCount),
+            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+            color = theme.textMuted,
+        )
+    }
+}
+
+@Composable
+private fun pluralWorkspaceCount(count: Int): String = if (count == 1) {
+    stringResource(R.string.start_work_workspace_count_one)
+} else {
+    stringResource(R.string.start_work_workspace_count_other, count)
+}
+
+/** `+ N more` row that lifts the per-server cap once the list runs past a screenful. */
+@Composable
+private fun startWorkShowMoreRow(endpointKey: String, hiddenCount: Int, onShowAll: () -> Unit) {
+    val theme = LocalOpenCodeTheme.current
+    Text(
+        text = stringResource(R.string.start_work_show_more, hiddenCount),
+        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+        color = theme.accent,
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = Sizing.minTouchTarget)
+            .clickable(role = Role.Button, onClick = onShowAll)
+            .padding(horizontal = Spacing.md, vertical = Spacing.sm)
+            .testTag("start_work_show_more_$endpointKey"),
+    )
+}
+
+private fun LazyListScope.startWorkPickerLedger(
+    params: MainTabContentParams,
+    rows: List<StartWorkPickerRow>,
+) {
+    val uiState = params.uiState
+    rows.forEach { row ->
+        val endpointKey = row.group.server.endpointKey
+        item(key = "server:$endpointKey") {
+            startWorkServerHeader(
+                row = row,
+                connectionState = params.scopedConnectionStates[endpointKey],
             ) {
-                Column(
-                    Modifier.padding(horizontal = Spacing.sm, vertical = Spacing.xs),
-                ) {
-                    Text(
-                        group.badgeLabel,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = if (selected) theme.primary else theme.text,
-                    )
-                    Text(
-                        group.server.displayName,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = theme.textMuted,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                uiState.pickerExpandedServers[endpointKey] = !row.expanded
+            }
+        }
+        items(
+            items = row.visibleTargets,
+            key = { target -> "target:$endpointKey:${target.workspaceKey}" },
+        ) { target ->
+            startWorkPickerTargetRow(params, target)
+        }
+        if (row.expanded) {
+            item(key = "add:$endpointKey") { startWorkAddWorkspaceRow(params, row.group.server) }
+        }
+        if (row.hiddenCount > 0) {
+            item(key = "more:$endpointKey") {
+                startWorkShowMoreRow(endpointKey, row.hiddenCount) {
+                    uiState.pickerShowAllServers[endpointKey] = true
                 }
             }
         }
     }
+    if (rows.isEmpty()) {
+        item(key = "picker_no_matches") {
+            Text(
+                stringResource(R.string.start_work_no_matching_workspaces),
+                style = MaterialTheme.typography.labelMedium,
+                color = LocalOpenCodeTheme.current.textMuted,
+                modifier = Modifier.padding(vertical = Spacing.md),
+            )
+        }
+    }
+    item(key = "picker_navigation_bar") { Spacer(Modifier.navigationBarsPadding()) }
 }
 
-private val startWorkPickerLedger: @Composable ColumnScope.(
-    MainTabContentParams,
-    List<StartWorkTarget>,
-) -> Unit = { params, targets ->
-    val labels = rememberTabTitleLabels()
-    targets.firstOrNull { it.workspaceKey == WorkspaceKey.Global }?.let { globalTarget ->
-        filesWorkspaceOption(
-            title = stringResource(R.string.sessions_global),
-            subtitle = workspaceSubtitle(globalTarget.workspaceKey),
-            marker = "◆",
-            onClick = { selectStartWorkPickerTarget(params, globalTarget) },
-            modifier = Modifier.testTag("start_work_target_global"),
-        )
+@Composable
+private fun startWorkPickerTargetRow(params: MainTabContentParams, target: StartWorkTarget) {
+    val currentTarget = params.uiState.startWorkContext?.selectedTarget
+    val isGlobal = target.workspaceKey == WorkspaceKey.Global
+    val directory = (target.workspaceKey as? WorkspaceKey.Directory)?.value
+    val label = directory?.let { params.workspaceLabels.directoryLabel(target.serverRef.endpointKey, it) }
+    val spec = StartWorkWorkspaceRowSpec(
+        target = target,
+        title = if (isGlobal) {
+            stringResource(R.string.sessions_global)
+        } else {
+            label?.primary ?: workspaceSubtitle(target.workspaceKey)
+        },
+        subtitle = label?.path ?: workspaceSubtitle(target.workspaceKey),
+        selected = target == currentTarget,
+    )
+    val onClick = { selectStartWorkPickerTarget(params, target) }
+    val rowTag = if (isGlobal) "start_work_target_global" else "start_work_target_${target.workspaceKey}"
+    if (label == null || directory == null) {
+        startWorkWorkspaceRow(spec = spec, onClick = onClick, modifier = Modifier.testTag(rowTag))
+        return
     }
-    val directories = targets.filter { it.workspaceKey != WorkspaceKey.Global }
-    if (directories.isEmpty()) {
-        Text(
-            stringResource(R.string.start_work_no_matching_workspaces),
-            style = MaterialTheme.typography.labelMedium,
-            color = LocalOpenCodeTheme.current.textMuted,
-            modifier = Modifier.padding(vertical = Spacing.md),
+    val isRoot = ServerPath.parseOrNull(directory)
+        ?.let { params.userWorkspaces.forServer(target.serverRef.endpointKey).isRoot(it) } == true
+    val summary = WorkspaceSummary(
+        serverRef = target.serverRef,
+        workspaceKey = target.workspaceKey,
+        sessionCount = 0,
+        openTabCount = 0,
+        mostRecentAt = 0L,
+        isUserRoot = isRoot,
+        label = label,
+    )
+    val actionsState = rememberWorkspaceActionsState(target.serverRef.endpointKey to target.workspaceKey)
+    val subject = WorkspaceActionSubject(
+        server = target.serverRef,
+        directory = directory,
+        label = label.copy(isUserRoot = isRoot),
+        canAddAsRoot = !isRoot && ServerPath.parseOrNull(directory) != null,
+    )
+    val handlers = pickerWorkspaceHandlers(params, summary)
+    Box {
+        startWorkWorkspaceRow(
+            spec = spec,
+            onClick = null,
+            modifier = Modifier.testTag(rowTag).workspaceActionGestures(actionsState, subject, handlers, onClick),
         )
-    } else {
-        LazyColumn(
-            Modifier.fillMaxWidth().weight(1f, fill = false),
-            verticalArrangement = Arrangement.spacedBy(Spacing.hairline),
-        ) {
-            items(
-                items = directories,
-                key = { target -> "target:${target.serverRef.endpointKey}:${target.workspaceKey}" },
-            ) { target ->
-                filesWorkspaceOption(
-                    title = workspaceLabel(target.workspaceKey, labels) ?: workspaceSubtitle(target.workspaceKey),
-                    subtitle = workspaceSubtitle(target.workspaceKey),
-                    marker = "◇",
-                    onClick = { selectStartWorkPickerTarget(params, target) },
-                    modifier = Modifier.testTag("start_work_target_${target.workspaceKey}"),
-                )
-            }
-            item(key = "picker_navigation_bar") { Spacer(Modifier.navigationBarsPadding()) }
+        workspaceActionMenu(state = actionsState, subject = subject, handlers = handlers)
+    }
+}
+
+private fun pickerWorkspaceHandlers(params: MainTabContentParams, workspace: WorkspaceSummary) =
+    WorkspaceActionHandlers(
+        onRename = { name -> params.homeWorkspaceActions.onRename(workspace, name) },
+        onResetName = { params.homeWorkspaceActions.onResetName(workspace) },
+        onCopyPath = { params.homeWorkspaceActions.onCopyPath(workspace) },
+        onAddAsWorkspace = {
+            openAddWorkspaceFromPicker(
+                params,
+                workspace.serverRef,
+                (workspace.workspaceKey as? WorkspaceKey.Directory)?.value,
+            )
+        },
+        onRemove = { params.homeWorkspaceActions.onRemove(workspace) },
+    )
+
+/** Hides the picker (keeping its pending action) and opens Add workspace for [server]. */
+private fun openAddWorkspaceFromPicker(params: MainTabContentParams, server: ServerRef, prefilledPath: String?) {
+    params.uiState.showStartWorkPicker = false
+    params.uiState.addWorkspaceLaunch = AddWorkspaceLaunch(
+        request = addWorkspaceRequest(params.savedServers, params.scopedConnectionStates, server, prefilledPath),
+        fromPicker = true,
+    )
+}
+
+/** `+ Add workspace…` at the end of an expanded server group in the picker. */
+@Composable
+private fun startWorkAddWorkspaceRow(params: MainTabContentParams, server: ServerRef) {
+    val description = stringResource(R.string.start_work_add_workspace_description, server.displayName)
+    Text(
+        text = stringResource(R.string.start_work_add_workspace),
+        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+        color = LocalOpenCodeTheme.current.accent,
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = Sizing.minTouchTarget)
+            .clickable(role = Role.Button) { openAddWorkspaceFromPicker(params, server, null) }
+            .semantics { contentDescription = description }
+            .padding(horizontal = Spacing.md, vertical = Spacing.sm)
+            .testTag("start_work_add_workspace_${server.endpointKey}"),
+    )
+}
+
+private data class StartWorkWorkspaceRowSpec(
+    val target: StartWorkTarget,
+    val title: String,
+    val subtitle: String,
+    val selected: Boolean,
+)
+
+@Composable
+private fun startWorkWorkspaceRow(
+    spec: StartWorkWorkspaceRowSpec,
+    onClick: (() -> Unit)?,
+    modifier: Modifier = Modifier,
+) {
+    val theme = LocalOpenCodeTheme.current
+    val projectColor =
+        ProjectColors.colorForProject("${spec.target.serverRef.endpointKey}:${spec.target.workspaceKey}")
+    val color = if (spec.selected) projectColor.copy(alpha = SELECTED_ROW_TINT) else theme.backgroundElement
+    val rowModifier = modifier.fillMaxWidth().heightIn(min = Sizing.minTouchTarget)
+    if (onClick == null) {
+        // The caller's modifier carries tap and long-press gestures.
+        Surface(shape = RectangleShape, color = color, modifier = rowModifier) {
+            startWorkWorkspaceRowContent(spec, projectColor)
         }
+    } else {
+        Surface(onClick = onClick, shape = RectangleShape, color = color, modifier = rowModifier) {
+            startWorkWorkspaceRowContent(spec, projectColor)
+        }
+    }
+}
+
+@Composable
+private fun startWorkWorkspaceRowContent(spec: StartWorkWorkspaceRowSpec, projectColor: Color) {
+    val theme = LocalOpenCodeTheme.current
+    val selected = spec.selected
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Spacing.md, vertical = Spacing.sm),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
+    ) {
+        Text("◆", style = MaterialTheme.typography.bodyMedium, color = projectColor)
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(Spacing.xxs),
+        ) {
+            Text(
+                text = spec.title,
+                style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                color = if (selected) projectColor else theme.text,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = spec.subtitle,
+                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                color = theme.textMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Text(
+            text = "→",
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (selected) projectColor else theme.textMuted,
+        )
     }
 }
 
@@ -296,21 +608,40 @@ internal data class StartWorkPickerGroup(
     val server: ServerRef,
     val badgeLabel: String,
     val targets: List<StartWorkTarget>,
+    /** Display names used for picker search; never for routing. */
+    val labels: WorkspaceLabelIndex = WorkspaceLabelIndex.Empty,
 )
 
+/**
+ * Picker sections per server: Global, then the user's workspaces by name, then discovered ones.
+ * Directories inside a user root are listed as that root.
+ */
 internal fun buildStartWorkPickerGroups(
     servers: List<Triple<String, String, String>>,
     openTargets: List<StartWorkTarget>,
     knownHomeTargets: List<StartWorkTarget>,
+    userWorkspaces: UserWorkspaceState = UserWorkspaceState.Empty,
+    labels: WorkspaceLabelIndex = WorkspaceLabelIndex.Empty,
 ): List<StartWorkPickerGroup> = servers.map { (endpointKey, displayName, badgeLabel) ->
     val server = ServerRef.fromEndpointKey(endpointKey, displayName)
-    val directoryTargets = (knownHomeTargets + openTargets)
+    val roots = userWorkspaces.rootsFor(endpointKey)
+    val rootTargets = roots
+        .map { StartWorkTarget(server, WorkspaceKey.Directory(it.value)) }
+        .sortedWith(
+            compareBy(String.CASE_INSENSITIVE_ORDER) { labels.primaryFor(server, it.workspaceKey).orEmpty() },
+        )
+    val discoveredTargets = (knownHomeTargets + openTargets)
         .filter { it.serverRef.endpointKey == endpointKey && it.workspaceKey != WorkspaceKey.Global }
-        .distinctBy { it.workspaceKey }
+        .map { target ->
+            val directory = (target.workspaceKey as? WorkspaceKey.Directory)?.value
+            directory?.let { target.copy(workspaceKey = WorkspaceAttribution.groupKeyFor(it, roots)) } ?: target
+        }
     StartWorkPickerGroup(
         server = server,
         badgeLabel = badgeLabel,
-        targets = listOf(StartWorkTarget(server, WorkspaceKey.Global)) + directoryTargets,
+        targets = listOf(StartWorkTarget(server, WorkspaceKey.Global)) +
+            (rootTargets + discoveredTargets).distinctBy { it.workspaceKey },
+        labels = labels,
     )
 }
 
@@ -342,7 +673,40 @@ private data class MainTabContentParams(
     val savedServerExists: (String) -> Boolean,
     val connectSavedServer: (String) -> Unit,
     val onDisconnect: () -> Unit,
+    val onSettings: () -> Unit,
+    val onRefreshHome: () -> Unit,
+    val homeSessionActions: HomeSessionActions,
+    val userWorkspaces: UserWorkspaceState,
+    /** Display names only; never used to route requests. */
+    val workspaceLabels: WorkspaceLabelIndex,
+    val workspaceHost: WorkspaceManagementHost,
+    val homeWorkspaceActions: HomeWorkspaceActions,
 )
+
+/**
+ * Home session actions run on the session's own server generation and workspace repository, leased
+ * from [SessionRepositoryProvider]; Home's own listings are the open workspace owners' repositories.
+ */
+@Composable
+private fun rememberHomeSessionActionRouter(
+    deps: MainTabDeps,
+    tabMaps: TabStateMaps,
+): HomeSessionActionRouter = remember(deps, tabMaps) {
+    HomeSessionActionRouter(
+        connectionState = { serverRef -> deps.serverConnectionRegistry.connectionState(serverRef).value },
+        generation = { serverRef -> deps.serverConnectionRegistry.generation(serverRef) },
+        acquireRepository = { workspace, generation ->
+            deps.sessionRepositoryProvider.acquire(workspace, generation).repository
+        },
+        releaseRepository = { workspace, generation -> deps.sessionRepositoryProvider.release(workspace, generation) },
+        homeRepositories = { serverRef ->
+            tabMaps.workspaceOwners.values
+                .filter { it.workspace.server.endpointKey == serverRef.endpointKey }
+                .map { it.sessionRepository }
+        },
+        refreshScope = deps.coroutineScope,
+    )
+}
 
 @Composable
 private fun rememberMainTabDeps(): MainTabDeps {
@@ -350,6 +714,7 @@ private fun rememberMainTabDeps(): MainTabDeps {
     val settingsDataStore: SettingsDataStore = koinInject()
     val serverConnectionRegistry: ServerConnectionRegistry = koinInject()
     val sessionRepositoryProvider: SessionRepositoryProvider = koinInject()
+    val foregroundState: ForegroundState = koinInject()
     val coroutineScope = rememberCoroutineScope()
     return remember(coroutineScope) {
         MainTabDeps(
@@ -357,6 +722,7 @@ private fun rememberMainTabDeps(): MainTabDeps {
             settingsDataStore = settingsDataStore,
             serverConnectionRegistry = serverConnectionRegistry,
             sessionRepositoryProvider = sessionRepositoryProvider,
+            foregroundState = foregroundState,
             coroutineScope = coroutineScope,
         )
     }
@@ -366,16 +732,28 @@ private val rememberStartWorkUiState: @Composable () -> StartWorkUiState = {
     remember { StartWorkUiState() }
 }
 
-private val rememberTabStateMaps: @Composable () -> TabStateMaps = {
-    remember {
-        TabStateMaps(
-            connectionStates = mutableStateMapOf(),
-            readTokens = mutableStateMapOf(),
-            routes = mutableStateMapOf(),
-            ptyIds = mutableStateMapOf(),
-            workspaceOwners = mutableStateMapOf(),
-        )
+/**
+ * Tab maps outlive Activity recreation (interface scale, theme, locale): tab ViewModels on the
+ * restored back stacks keep the workspace owners they were built with, so those owners must stay
+ * open. They are closed only when the main tab destination itself is popped.
+ */
+private class MainTabStateHolder : ViewModel() {
+    val tabMaps = TabStateMaps(
+        connectionStates = mutableStateMapOf(),
+        readTokens = mutableStateMapOf(),
+        routes = mutableStateMapOf(),
+        ptyIds = mutableStateMapOf(),
+        workspaceOwners = mutableStateMapOf(),
+    )
+
+    override fun onCleared() {
+        tabMaps.workspaceOwners.values.forEach { it.close() }
+        tabMaps.workspaceOwners.clear()
     }
+}
+
+private val rememberTabStateMaps: @Composable () -> TabStateMaps = {
+    viewModel { MainTabStateHolder() }.tabMaps
 }
 
 private val rememberScopedConnectionStates: @Composable (
@@ -409,11 +787,17 @@ private val rememberConnectSavedServer: @Composable (
     }
 }
 
-private val mainTabForegroundEffect: @Composable (ServerConnectionRegistry, LifecycleOwner) -> Unit =
-    { serverConnectionRegistry, lifecycleOwner ->
+private val mainTabForegroundEffect: @Composable (ServerConnectionRegistry, ForegroundState, LifecycleOwner) -> Unit =
+    { serverConnectionRegistry, foregroundState, lifecycleOwner ->
         LaunchedEffect(lifecycleOwner) {
             lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                serverConnectionRegistry.onAppForegrounded()
+                foregroundState.setForeground(true)
+                try {
+                    serverConnectionRegistry.onAppForegrounded()
+                    awaitCancellation()
+                } finally {
+                    foregroundState.setForeground(false)
+                }
             }
         }
     }
@@ -477,12 +861,6 @@ private fun mainTabWorkspaceOwnersEffect(
     scopedConnectionStates: Map<String, ConnectionState>,
     workspaceOwners: SnapshotStateMap<String, WorkspaceRepositoryOwner>,
 ) {
-    DisposableEffect(Unit) {
-        onDispose {
-            workspaceOwners.values.forEach { it.close() }
-            workspaceOwners.clear()
-        }
-    }
     val tabOwnerInputs = tabs.mapNotNull { tab ->
         val serverRef = tab.serverRef ?: return@mapNotNull null
         val workspaceKey = tab.workspaceKey ?: return@mapNotNull null
@@ -624,9 +1002,22 @@ private fun rememberCloseTab(
             tabMaps.routes.remove(tabId)
             tabMaps.ptyIds.remove(tabId)
             tabMaps.connectionStates.remove(tabId)
-            deps.tabManager.closeTab(tabId)
+            closeTabWorkspaceOwner(
+                tabId = tabId,
+                workspaceOwners = tabMaps.workspaceOwners,
+                closeTab = deps.tabManager::closeTab,
+            )
         }
     }
+}
+
+internal fun closeTabWorkspaceOwner(
+    tabId: String,
+    workspaceOwners: MutableMap<String, WorkspaceRepositoryOwner>,
+    closeTab: (String) -> Unit,
+) {
+    workspaceOwners.remove(tabId)?.close()
+    closeTab(tabId)
 }
 
 @Composable
@@ -638,7 +1029,9 @@ private fun mainTabPendingStartWorkEffect(
     savedServerExists: (String) -> Boolean,
     connectSavedServer: (String) -> Unit,
     snackbarHostState: SnackbarHostState,
+    workspaceLabels: WorkspaceLabelIndex,
 ) {
+    val currentLabels by rememberUpdatedState(workspaceLabels)
     LaunchedEffect(uiState.pendingStartWork, scopedConnectionStates) {
         val pending = uiState.pendingStartWork ?: return@LaunchedEffect
         val target = pending.first
@@ -697,7 +1090,7 @@ private fun mainTabPendingStartWorkEffect(
                     is ApiResult.Success -> {
                         uiState.pendingStartWork = null
                         deps.tabManager.createTab(
-                            startRoute = Screen.Chat.createRoute(result.data.id),
+                            startRoute = Screen.Chat.createRoute(result.data.id, focusInput = true),
                             workspaceKey = target.workspaceKey,
                             serverRef = target.serverRef,
                             focus = true,
@@ -724,7 +1117,10 @@ private fun mainTabPendingStartWorkEffect(
                     api.createPtySession(
                         directory = (target.workspaceKey as? WorkspaceKey.Directory)?.value,
                         workspace = null,
-                        request = createPtyRequestForWorkspace(target.workspaceKey),
+                        request = createPtyRequestForWorkspace(
+                            target.workspaceKey,
+                            currentLabels.primaryFor(target.serverRef, target.workspaceKey),
+                        ),
                     )
                 }
                 when (result) {
@@ -806,15 +1202,23 @@ object MainTabScreen {
         pendingNotificationRoute: StateFlow<NotificationRoute?>,
         onNotificationRouteConsumed: (NotificationRoute) -> Unit,
         onDisconnect: () -> Unit,
+        onSettings: () -> Unit = {},
         modifier: Modifier = Modifier,
     ) {
         val deps = rememberMainTabDeps()
         val uiState = rememberStartWorkUiState()
         val tabMaps = rememberTabStateMaps()
         val lifecycleOwner = LocalLifecycleOwner.current
+        val focusManager = LocalFocusManager.current
+        val keyboardController = LocalSoftwareKeyboardController.current
+        val releasePageFocus: () -> Unit = {
+            focusManager.clearFocus(force = true)
+            keyboardController?.hide()
+            Unit
+        }
 
         LaunchedEffect(Unit) { deps.tabManager.ensureHomeTab(focus = false) }
-        mainTabForegroundEffect(deps.serverConnectionRegistry, lifecycleOwner)
+        mainTabForegroundEffect(deps.serverConnectionRegistry, deps.foregroundState, lifecycleOwner)
 
         val tabs by deps.tabManager.tabs.collectAsStateWithLifecycle()
         val activeTabId by deps.tabManager.activeTabId.collectAsStateWithLifecycle()
@@ -822,6 +1226,9 @@ object MainTabScreen {
         val savedServers by deps.settingsDataStore.savedServers.collectAsStateWithLifecycle(
             initialValue = emptyList(),
         )
+        val loadedUserWorkspaces by deps.settingsDataStore.userWorkspaces
+            .collectAsStateWithLifecycle<UserWorkspaceState?>(initialValue = null)
+        val userWorkspaces = loadedUserWorkspaces ?: UserWorkspaceState.Empty
         val scopedConnectionStates = rememberScopedConnectionStates(
             savedServers,
             deps.serverConnectionRegistry,
@@ -865,12 +1272,23 @@ object MainTabScreen {
         )
         mainTabPresenceCollection(tabs, activeTabId, tabMaps)
 
-        val homeRepositoryStates = tabMaps.workspaceOwners.values
+        val distinctWorkspaceOwners = tabMaps.workspaceOwners.values
             .distinctBy { it.workspace.server.endpointKey to it.workspace.key }
-            .map { owner ->
-                val state by owner.sessionRepository.state.collectAsStateWithLifecycle()
-                ScopedHomeRepositoryState(owner.workspace.server, state)
+        val homeRepositoryStates = distinctWorkspaceOwners.map { owner ->
+            val state by owner.sessionRepository.state.collectAsStateWithLifecycle()
+            ScopedHomeRepositoryState(owner.workspace.server, state)
+        }
+        val onRefreshHome: () -> Unit = {
+            distinctWorkspaceOwners.forEach { owner ->
+                deps.coroutineScope.launch { owner.sessionRepository.refresh() }
             }
+        }
+        val workspaceLabels = rememberWorkspaceLabels(userWorkspaces, homeRepositoryStates, tabs)
+        userRootsRefreshEffect(loadedUserWorkspaces) { endpointKey ->
+            distinctWorkspaceOwners
+                .filter { it.workspace.server.endpointKey == endpointKey }
+                .forEach { owner -> deps.coroutineScope.launch { owner.sessionRepository.refresh() } }
+        }
 
         val closeTab = rememberCloseTab(deps, tabMaps)
         val snackbarHostState = remember { SnackbarHostState() }
@@ -881,8 +1299,24 @@ object MainTabScreen {
             savedServerExists,
             connectSavedServer,
             snackbarHostState,
+            workspaceLabels,
         )
         mainTabSnackbarEffects(deps, showTabWarning, uiState, snackbarHostState)
+        val homeSessionActions = rememberHomeSessionActions(
+            router = rememberHomeSessionActionRouter(deps, tabMaps),
+            tabManager = deps.tabManager,
+            scope = deps.coroutineScope,
+            showMessage = remember(snackbarHostState, deps.coroutineScope) {
+                mainTabMessenger(deps.coroutineScope, snackbarHostState)
+            },
+        )
+        val workspaceHost = rememberWorkspaceManagementHost(deps, snackbarHostState, workspaceLabels, userWorkspaces)
+        val homeWorkspaceActions = rememberHomeWorkspaceActions(workspaceHost) { server, prefilledPath ->
+            uiState.addWorkspaceLaunch = AddWorkspaceLaunch(
+                request = addWorkspaceRequest(savedServers, scopedConnectionStates, server, prefilledPath),
+                fromPicker = false,
+            )
+        }
 
         val params = MainTabContentParams(
             deps = deps,
@@ -894,13 +1328,24 @@ object MainTabScreen {
             savedServerViews = savedServerViews,
             scopedConnectionStates = scopedConnectionStates,
             homeRepositoryStates = homeRepositoryStates,
-            closeTab = closeTab,
+            closeTab = { id ->
+                if (id == activeTabId) releasePageFocus()
+                closeTab(id)
+            },
             savedServerExists = savedServerExists,
             connectSavedServer = connectSavedServer,
             onDisconnect = onDisconnect,
+            onSettings = onSettings,
+            onRefreshHome = onRefreshHome,
+            homeSessionActions = homeSessionActions,
+            userWorkspaces = userWorkspaces,
+            workspaceLabels = workspaceLabels,
+            workspaceHost = workspaceHost,
+            homeWorkspaceActions = homeWorkspaceActions,
         )
-        mainTabScaffold(params, snackbarHostState, modifier)
+        mainTabScaffold(params, snackbarHostState, releasePageFocus, modifier)
         startWorkSheets(params)
+        addWorkspaceSheetHost(params)
     }
 }
 
@@ -909,11 +1354,12 @@ object MainTabScreen {
 private fun mainTabScaffold(
     params: MainTabContentParams,
     snackbarHostState: SnackbarHostState,
+    releasePageFocus: () -> Unit,
     modifier: Modifier,
 ) {
     val theme = LocalOpenCodeTheme.current
     val tabTitleLabels = rememberTabTitleLabels()
-    val tabTitles = params.tabs.associate { it.id to getTitleForTab(it, tabTitleLabels) }
+    val tabTitles = getTitlesForTabs(params.tabs, tabTitleLabels, params.workspaceLabels)
     val tabIcons = params.tabs.associate { it.id to getIconForTab(it) }
     val pagerState = rememberPagerState(
         initialPage = params.tabs.indexOfFirst { it.id == params.activeTabId }.coerceAtLeast(0),
@@ -922,6 +1368,7 @@ private fun mainTabScaffold(
     LaunchedEffect(params.activeTabId, params.tabs.size) {
         val index = params.tabs.indexOfFirst { it.id == params.activeTabId }
         if (index >= 0 && pagerState.currentPage != index) {
+            releasePageFocus()
             pagerState.animateScrollToPage(index)
         }
     }
@@ -946,18 +1393,22 @@ private fun mainTabScaffold(
                 tabTitles = tabTitles,
                 tabIcons = tabIcons,
                 tabConnectionStates = params.tabMaps.connectionStates,
-                onTabClick = { id -> params.deps.tabManager.focusTab(id) },
+                onTabClick = { id ->
+                    if (id != params.activeTabId) releasePageFocus()
+                    params.deps.tabManager.focusTab(id)
+                },
                 onTabClose = params.closeTab,
                 onAddClick = {
                     if (params.deps.tabManager.activeTab?.isPinnedHome == true) {
-                        params.uiState.showStartWorkPicker = true
+                        params.uiState.startWorkContext = startWorkContextFor(params.deps.tabManager.activeTab)
+                        openStartWorkPicker(params.uiState, StartWorkAction.NewChat)
                     } else {
                         params.uiState.startWorkContext = startWorkContextFor(params.deps.tabManager.activeTab)
                         params.uiState.showStartWorkSheet = true
                     }
                 },
             )
-            mainTabPager(params, pagerState)
+            mainTabPager(params, pagerState, releasePageFocus)
         }
     }
 }
@@ -966,8 +1417,16 @@ private fun mainTabScaffold(
 private fun ColumnScope.mainTabPager(
     params: MainTabContentParams,
     pagerState: PagerState,
+    releasePageFocus: () -> Unit,
 ) {
     val saveableStateHolder = rememberSaveableStateHolder()
+    LaunchedEffect(pagerState, params.tabs) {
+        var currentTabId = params.tabs.getOrNull(pagerState.currentPage)?.id
+        snapshotFlow { params.tabs.getOrNull(pagerState.currentPage)?.id }.collect { tabId ->
+            if (tabId != null && tabId != currentTabId) releasePageFocus()
+            currentTabId = tabId
+        }
+    }
     HorizontalPager(
         state = pagerState,
         modifier = Modifier.weight(1f),
@@ -999,12 +1458,15 @@ private fun mainTabPageContent(
     }
     val isActive = tab.id == params.activeTabId
     val workspaceOwner = params.tabMaps.workspaceOwners[tab.id]
-    if (tab.isPinnedHome) {
-        mainTabHomeContent(params, homeRepositoryStates)
-    } else if (workspaceOwner != null) {
-        mainTabTabNavHostContent(params, tab, navController, isActive, workspaceOwner)
-    } else {
-        mainTabEmptyContent(params, tab)
+    // Display names for screens inside tabs (Files, chat picker, sessions, projects); never routing.
+    CompositionLocalProvider(LocalWorkspaceLabels provides params.workspaceLabels) {
+        if (tab.isPinnedHome) {
+            mainTabHomeContent(params, homeRepositoryStates)
+        } else if (workspaceOwner != null) {
+            mainTabTabNavHostContent(params, tab, navController, isActive, workspaceOwner)
+        } else {
+            mainTabEmptyContent(params, tab)
+        }
     }
 }
 
@@ -1020,27 +1482,27 @@ private fun mainTabHomeContent(
                 connectionStates = params.scopedConnectionStates,
                 tabs = params.tabs,
                 repositories = homeRepositoryStates,
+                userWorkspaces = params.userWorkspaces,
+                labels = params.workspaceLabels,
             ),
         ),
         actions = HomeActions(
             onBrowseSessions = { target ->
                 requestScopedAction(params, target, StartWorkAction.BrowseSessions)
             },
-            onBrowseAllSessions = { params.uiState.showFilesTabPrompt = true },
+            onBrowseAllSessions = {
+                openStartWorkPicker(params.uiState, StartWorkAction.BrowseSessions)
+            },
             onManageServers = params.onDisconnect,
+            onRefresh = params.onRefreshHome,
+            onSettings = params.onSettings,
             onFocusTab = params.deps.tabManager::focusTab,
             onResumeSession = { session ->
-                val existing = params.deps.tabManager.findTabBySessionId(session.sessionId.value)
-                if (existing != null) {
-                    params.deps.tabManager.focusTab(existing.id)
-                } else {
-                    params.deps.tabManager.createTab(
-                        startRoute = Screen.Chat.createRoute(session.sessionId.value),
-                        workspaceKey = session.workspaceKey,
-                        serverRef = session.serverRef,
-                        focus = true,
-                    )
-                }
+                params.deps.tabManager.focusOrOpenSessionTab(
+                    serverRef = session.serverRef,
+                    workspaceKey = session.workspaceKey,
+                    sessionId = session.sessionId.value,
+                )
             },
             onStartScopedWork = { target ->
                 params.uiState.homeDetailSelection = StartWorkSelection.Selected(target)
@@ -1051,8 +1513,12 @@ private fun mainTabHomeContent(
             onOpenTerminal = { target ->
                 requestScopedAction(params, target, StartWorkAction.Terminal)
             },
-            onChooseTarget = { params.uiState.showFilesTabPrompt = true },
+            onChooseTarget = {
+                openStartWorkPicker(params.uiState)
+            },
             onWorkspaceDetailChanged = { params.uiState.homeDetailSelection = it },
+            sessionActions = params.homeSessionActions,
+            workspaceActions = params.homeWorkspaceActions,
         ),
         modifier = Modifier.fillMaxSize(),
     )
@@ -1082,7 +1548,7 @@ private fun mainTabTabNavHostContent(
             if (sr != null && wk != null) {
                 requestScopedAction(params, StartWorkTarget(sr, wk), StartWorkAction.Files)
             } else {
-                params.uiState.showStartWorkPicker = true
+                openStartWorkPicker(params.uiState, StartWorkAction.Files)
             }
         },
         onNewTerminalTab = {
@@ -1091,7 +1557,7 @@ private fun mainTabTabNavHostContent(
             if (sr != null && wk != null) {
                 requestScopedAction(params, StartWorkTarget(sr, wk), StartWorkAction.Terminal)
             } else {
-                params.uiState.showStartWorkPicker = true
+                openStartWorkPicker(params.uiState, StartWorkAction.Terminal)
             }
         },
         isActiveTab = isActive,
@@ -1148,8 +1614,13 @@ private fun requestScopedAction(
                 params.connectSavedServer(target.serverRef.endpointKey)
             }
         }
-        StartWorkAction.ChooseAnotherTarget -> uiState.showStartWorkPicker = true
+        StartWorkAction.ChooseAnotherTarget -> openStartWorkPicker(uiState)
     }
+}
+
+private fun openStartWorkPicker(uiState: StartWorkUiState, action: StartWorkAction? = null) {
+    uiState.pickerAction = action
+    uiState.showStartWorkPicker = true
 }
 
 private val startWorkSheets: @Composable (MainTabContentParams) -> Unit = { params ->
@@ -1157,9 +1628,41 @@ private val startWorkSheets: @Composable (MainTabContentParams) -> Unit = { para
     if (uiState.showStartWorkSheet) {
         startWorkSheet(params)
     }
-    if (uiState.showStartWorkPicker || uiState.showFilesTabPrompt) {
+    if (uiState.showStartWorkPicker) {
         startWorkPickerSheet(params)
     }
+}
+
+/**
+ * Hosts the Add workspace sheet. Browsing uses the connected server's Home client
+ * (`Workspace(server, null)`), routed explicitly at the browsed path's filesystem root.
+ */
+@Composable
+private fun addWorkspaceSheetHost(params: MainTabContentParams) {
+    val launch = params.uiState.addWorkspaceLaunch ?: return
+    val dependencies = params.workspaceHost.addWorkspaceDependencies(
+        browserFor = { server ->
+            params.tabMaps.workspaceOwners["home:${server.endpointKey}"]
+                ?.let { owner -> workspaceClientDirectoryBrowser(owner.workspaceClient) }
+        },
+        browseStart = { server -> browseStartFor(server.endpointKey, params.homeRepositoryStates, params.tabs) },
+    )
+    addWorkspaceSheet(
+        request = launch.request,
+        dependencies = dependencies,
+        onDismiss = {
+            // Still open means cancelled (onAdded clears it first): return to the picker with its action intact.
+            val cancelled = params.uiState.addWorkspaceLaunch == launch
+            params.uiState.addWorkspaceLaunch = null
+            if (cancelled && launch.fromPicker) params.uiState.showStartWorkPicker = true
+        },
+        onAdded = { server, path ->
+            params.uiState.addWorkspaceLaunch = null
+            if (launch.fromPicker) {
+                selectStartWorkPickerTarget(params, StartWorkTarget(server, WorkspaceKey.Directory(path.value)))
+            }
+        },
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1200,18 +1703,23 @@ private fun startWorkSheetContent(
             .padding(bottom = Spacing.md),
         verticalArrangement = Arrangement.spacedBy(Spacing.sm),
     ) {
-        Text(stringResource(R.string.start_work_title), style = MaterialTheme.typography.titleLarge)
+        Text(
+            stringResource(R.string.start_work_title),
+            style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold),
+        )
         if (target == null) {
             Text(stringResource(R.string.start_work_choose_context), color = theme.textMuted)
-            LaunchedEffect(Unit) { params.uiState.showStartWorkPicker = true }
+            LaunchedEffect(Unit) { openStartWorkPicker(params.uiState) }
         } else {
             startWorkSheetTargetCard(params, target)
+            startWorkSectionHeader(stringResource(R.string.start_work_section_new))
             startWorkSheetScopedActions(params, target)
-            Text(stringResource(R.string.start_work_existing_work), color = theme.textMuted)
+            startWorkSectionHeader(stringResource(R.string.start_work_section_existing))
             startWorkActionRow(
                 label = stringResource(R.string.start_work_sessions),
                 description = stringResource(R.string.start_work_sessions_description),
                 marker = "S",
+                markerColor = theme.accent,
             ) {
                 params.uiState.showStartWorkSheet = false
                 requestScopedAction(params, target, StartWorkAction.BrowseSessions)
@@ -1220,50 +1728,91 @@ private fun startWorkSheetContent(
     }
 }
 
+/** Uppercase, letter-spaced `NEW` / `EXISTING` section label for the Start-work sheet. */
 @Composable
+private fun startWorkSectionHeader(label: String) {
+    val theme = LocalOpenCodeTheme.current
+    Text(
+        text = label.uppercase(),
+        style = MaterialTheme.typography.labelSmall,
+        fontFamily = FontFamily.Monospace,
+        letterSpacing = 1.sp,
+        color = theme.textMuted,
+        modifier = Modifier.padding(top = Spacing.sm, bottom = Spacing.xxs),
+    )
+}
+
+@Composable
+@Suppress("LongMethod")
 private fun startWorkSheetTargetCard(
     params: MainTabContentParams,
     target: StartWorkTarget,
 ) {
     val theme = LocalOpenCodeTheme.current
     val tabTitleLabels = rememberTabTitleLabels()
+    val connectionState = params.scopedConnectionStates[target.serverRef.endpointKey]
+    val statusColor = connectionStatusColor(connectionState)
+    val workspaceName = params.workspaceLabels.primaryFor(target.serverRef, target.workspaceKey)
+        ?: workspaceLabel(target.workspaceKey, tabTitleLabels)
+        ?: workspaceSubtitle(target.workspaceKey)
     Surface(
         color = theme.backgroundElement,
-        shape = TuiShapes.small,
-        modifier = Modifier.fillMaxWidth().testTag("start_work_context"),
+        shape = RectangleShape,
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(Sizing.strokeMd, theme.borderSubtle, RectangleShape)
+            .testTag("start_work_context"),
     ) {
-        Column(Modifier.padding(Spacing.md)) {
+        Column(Modifier.padding(Spacing.md), verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(stringResource(R.string.start_work_in), color = theme.textMuted)
-                Spacer(Modifier.width(Spacing.sm))
-                val connectionStatus = connectionStatusText(
-                    params.scopedConnectionStates[target.serverRef.endpointKey],
+                Box(
+                    modifier = Modifier
+                        .size(Sizing.indicatorDotActive)
+                        .background(statusColor, RectangleShape),
                 )
+                Spacer(Modifier.width(Spacing.sm))
                 Text(
-                    "${target.serverRef.displayName} · $connectionStatus",
+                    target.serverRef.displayName,
+                    color = statusColor,
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.width(Spacing.sm))
+                Text(
+                    "· ${connectionStatusLabel(connectionState)}",
                     color = theme.textMuted,
+                    style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                TextButton(onClick = { params.uiState.showStartWorkPicker = true }) {
-                    Text(stringResource(R.string.start_work_change))
+                Box(
+                    modifier = Modifier
+                        .widthIn(min = Sizing.minTouchTarget)
+                        .heightIn(min = Sizing.minTouchTarget)
+                        .clickable(role = Role.Button) { openStartWorkPicker(params.uiState) }
+                        .padding(horizontal = Spacing.xs),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = stringResource(R.string.start_work_change).lowercase(),
+                        color = theme.accent,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 }
             }
             Text(
-                workspaceLabel(target.workspaceKey, tabTitleLabels)
-                    ?: workspaceSubtitle(target.workspaceKey),
+                text = workspaceName,
+                color = ProjectColors.colorForProject(
+                    "${target.serverRef.endpointKey}:${target.workspaceKey}",
+                ),
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Medium,
+                style = MaterialTheme.typography.titleSmall,
             )
         }
-    }
-}
-
-private val connectionStatusText: @Composable (ConnectionState?) -> String = { state ->
-    when (state) {
-        is ConnectionState.Connected -> stringResource(R.string.server_status_connected)
-        is ConnectionState.Connecting -> stringResource(R.string.server_status_connecting)
-        is ConnectionState.Error -> stringResource(R.string.server_status_error)
-        else -> stringResource(R.string.server_status_offline)
     }
 }
 
@@ -1272,17 +1821,21 @@ private fun startWorkSheetScopedActions(
     params: MainTabContentParams,
     target: StartWorkTarget,
 ) {
+    val theme = LocalOpenCodeTheme.current
     val labels = mapOf(
-        StartWorkAction.NewChat to (R.string.start_work_new_chat to "C"),
-        StartWorkAction.Files to (R.string.start_work_files to "F"),
-        StartWorkAction.Terminal to (R.string.start_work_terminal to "T"),
+        StartWorkAction.NewChat to Triple(R.string.start_work_new_chat, "C", theme.primary),
+        StartWorkAction.Files to Triple(R.string.start_work_files, "F", theme.info),
+        StartWorkAction.Terminal to Triple(R.string.start_work_terminal, "T", theme.success),
     )
     startWorkScopedActionOrder.forEach { action ->
-        val (label, marker) = checkNotNull(labels[action])
+        val (label, marker, markerColor) = checkNotNull(labels[action])
+        // The target card directly above already names the server and workspace, so the rows
+        // stay single-line instead of repeating it three times.
         startWorkActionRow(
             label = stringResource(label),
-            description = stringResource(R.string.start_work_scoped_action),
+            description = null,
             marker = marker,
+            markerColor = markerColor,
         ) {
             params.uiState.showStartWorkSheet = false
             requestScopedAction(params, target, action)
@@ -1300,14 +1853,19 @@ private fun startWorkPickerSheet(params: MainTabContentParams) {
         val workspaceKey = tab.workspaceKey ?: return@mapNotNull null
         StartWorkTarget(serverRef, workspaceKey)
     }.distinct()
-    val knownHomeTargets = remember(params.homeRepositoryStates) {
-        deriveStartWorkPickerTargets(params.homeRepositoryStates)
+    val knownHomeTargets = remember(params.homeRepositoryStates, params.userWorkspaces) {
+        deriveStartWorkPickerTargets(params.homeRepositoryStates, params.userWorkspaces)
     }
+    // Every opening starts from the full tree rather than the previous session's filter.
+    LaunchedEffect(Unit) { uiState.pickerSearchQuery = "" }
     ModalBottomSheet(
         onDismissRequest = {
             uiState.showStartWorkPicker = false
-            uiState.showFilesTabPrompt = false
+            uiState.pickerAction = null
         },
+        // Opening fully expanded gives the workspace list a bounded height to scroll inside;
+        // a partially-expanded sheet clips the tail of a long server instead.
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         containerColor = theme.background,
         modifier = Modifier.testTag("start_work_context_picker"),
     ) {
@@ -1322,64 +1880,102 @@ private fun startWorkPickerContent(
     knownHomeTargets: List<StartWorkTarget>,
 ) {
     val theme = LocalOpenCodeTheme.current
-    val tabTitleLabels = rememberTabTitleLabels()
     val uiState = params.uiState
-    val groups = remember(params.savedServerViews, openTargets, knownHomeTargets) {
+    val groups = remember(
+        params.savedServerViews,
+        openTargets,
+        knownHomeTargets,
+        params.userWorkspaces,
+        params.workspaceLabels,
+    ) {
         buildStartWorkPickerGroups(
             params.savedServerViews.map { Triple(it.endpointKey, it.displayName, it.badgeLabel) },
             openTargets,
             knownHomeTargets,
+            params.userWorkspaces,
+            params.workspaceLabels,
         )
     }
-    LaunchedEffect(groups, uiState.pickerSelectedEndpointKey) {
-        if (groups.none { it.server.endpointKey == uiState.pickerSelectedEndpointKey }) {
-            uiState.pickerSelectedEndpointKey = groups.firstOrNull()?.server?.endpointKey
+    val viewState = StartWorkPickerViewState(
+        query = uiState.pickerSearchQuery,
+        expandedOverrides = uiState.pickerExpandedServers.toMap(),
+        showAllEndpointKeys = uiState.pickerShowAllServers.filterValues { it }.keys,
+        defaultExpandedEndpointKey = uiState.startWorkContext?.selectedTarget?.serverRef?.endpointKey
+            ?: groups.firstOrNull()?.server?.endpointKey,
+    )
+    val rows = remember(groups, viewState) { buildStartWorkPickerRows(groups, viewState) }
+    Column(
+        Modifier.fillMaxSize().padding(horizontal = Spacing.md),
+        verticalArrangement = Arrangement.spacedBy(Spacing.sm),
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(Spacing.xxs)) {
+            Text(
+                stringResource(R.string.start_work_picker_title),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = theme.text,
+            )
+            Text(
+                stringResource(R.string.start_work_picker_subtitle),
+                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                color = theme.textMuted,
+            )
         }
-    }
-    val pickerState = StartWorkPickerState(uiState.pickerSelectedEndpointKey, uiState.pickerSearchQuery)
-    val selectedGroup = groups.firstOrNull { it.server.endpointKey == pickerState.selectedEndpointKey }
-    val targets = remember(groups, pickerState) { pickerState.filteredTargets(groups) }
-    Column(Modifier.fillMaxWidth().padding(horizontal = Spacing.md)) {
-        Text(
-            stringResource(R.string.start_work_choose_context),
-            style = MaterialTheme.typography.titleMedium,
-        )
         if (params.savedServerViews.isEmpty()) {
             Text(stringResource(R.string.start_work_no_servers), color = theme.textMuted)
         }
         startWorkPickerSearch(uiState)
-        startWorkServerRail(groups, selectedGroup, uiState)
-        startWorkPickerLedger(params, targets)
+        LazyColumn(
+            Modifier.fillMaxWidth().weight(1f),
+            verticalArrangement = Arrangement.spacedBy(Spacing.hairline),
+        ) {
+            startWorkPickerLedger(params, rows)
+        }
     }
 }
 
-internal val createPtyRequestForWorkspace: (WorkspaceKey) -> CreatePtyRequest = { workspaceKey ->
+/** Terminal request for [workspaceKey]; [workspaceName] is the directory workspace's display name. */
+internal fun createPtyRequestForWorkspace(workspaceKey: WorkspaceKey, workspaceName: String?): CreatePtyRequest =
     CreatePtyRequest(
         cwd = (workspaceKey as? WorkspaceKey.Directory)?.value,
-        title = terminalTitle(workspaceKey),
+        title = when (workspaceKey) {
+            is WorkspaceKey.Directory -> workspaceName?.takeIf { it.isNotBlank() } ?: "Terminal"
+            WorkspaceKey.Global -> null
+            is WorkspaceKey.SessionScoped -> workspaceKey.sessionId.value
+        },
     )
-}
 
 private val selectStartWorkPickerTarget: (MainTabContentParams, StartWorkTarget) -> Unit =
     { params, pickedTarget ->
-        params.uiState.startWorkContext = StartWorkContext(
-            StartWorkSource.OtherTab,
-            StartWorkSelection.Selected(pickedTarget),
-            params.uiState.startWorkContext?.defaultAction,
-        )
+        val selection = resolveStartWorkPickerSelection(pickedTarget, params.uiState.pickerAction)
+        params.uiState.startWorkContext = selection.context
         params.uiState.homeDetailSelection = StartWorkSelection.Selected(pickedTarget)
         params.uiState.showStartWorkPicker = false
-        params.uiState.showFilesTabPrompt = false
-        params.uiState.showStartWorkSheet = true
+        params.uiState.pickerAction = null
+        if (selection.action != null) {
+            requestScopedAction(params, pickedTarget, selection.action)
+        } else {
+            params.uiState.showStartWorkSheet = true
+        }
     }
 
-private val terminalTitle: (WorkspaceKey) -> String? = { workspaceKey ->
-    when (workspaceKey) {
-        is WorkspaceKey.Directory -> workspaceKey.value.trimEnd('/').substringAfterLast('/').ifBlank { "Terminal" }
-        WorkspaceKey.Global -> null
-        is WorkspaceKey.SessionScoped -> workspaceKey.sessionId.value
-    }
-}
+internal data class StartWorkPickerSelection(
+    val context: StartWorkContext,
+    val action: StartWorkAction?,
+)
+
+/** Resolves only the intent attached to this picker opening; no prior context action is retained. */
+internal fun resolveStartWorkPickerSelection(
+    target: StartWorkTarget,
+    invocationAction: StartWorkAction?,
+): StartWorkPickerSelection = StartWorkPickerSelection(
+    context = StartWorkContext(
+        source = StartWorkSource.OtherTab,
+        selection = StartWorkSelection.Selected(target),
+        defaultAction = null,
+    ),
+    action = invocationAction,
+)
 
 private val workspaceSubtitle: (WorkspaceKey) -> String = { workspaceKey ->
     when (workspaceKey) {
@@ -1392,15 +1988,17 @@ private val workspaceSubtitle: (WorkspaceKey) -> String = { workspaceKey ->
 @Composable
 private fun startWorkActionRow(
     label: String,
-    description: String,
+    description: String?,
     marker: String,
+    markerColor: Color,
     onClick: () -> Unit,
 ) {
-    val actionDescription = stringResource(R.string.start_work_action_accessibility, label, description)
+    val actionDescription = stringResource(R.string.start_work_action_accessibility, label, description.orEmpty())
     filesWorkspaceOption(
         title = label,
         subtitle = description,
         marker = marker,
+        markerColor = markerColor,
         onClick = onClick,
         modifier = Modifier
             .testTag("start_work_${marker.lowercase()}")
@@ -1409,45 +2007,52 @@ private fun startWorkActionRow(
 }
 
 @Composable
+@Suppress("LongParameterList")
 private fun filesWorkspaceOption(
     title: String,
-    subtitle: String,
+    subtitle: String?,
     marker: String,
+    markerColor: Color,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val theme = LocalOpenCodeTheme.current
-    Surface(
+    Row(
         modifier = modifier
             .fillMaxWidth()
             .heightIn(min = Sizing.minTouchTarget)
-            .clickable(role = Role.Button, onClick = onClick),
-        color = theme.backgroundElement,
-        shape = TuiShapes.small,
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(vertical = Spacing.xs),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
+        // Bordered square badge with the action's letter (C/F/T/S).
+        Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = Spacing.md, vertical = Spacing.sm),
-            verticalAlignment = Alignment.CenterVertically,
+                .size(Sizing.iconButtonSm)
+                .border(Sizing.strokeMd, theme.borderSubtle, RectangleShape),
+            contentAlignment = Alignment.Center,
         ) {
             Text(
                 text = marker,
                 style = MaterialTheme.typography.bodyMedium,
-                color = theme.textMuted,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Medium,
+                color = markerColor,
             )
-            Spacer(Modifier.width(Spacing.sm))
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(Spacing.xxs),
-            ) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = theme.text,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+        }
+        Spacer(Modifier.width(Spacing.md))
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(Spacing.xxs),
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium,
+                color = theme.text,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (subtitle != null) {
                 Text(
                     text = subtitle,
                     style = MaterialTheme.typography.labelSmall,
@@ -1456,12 +2061,12 @@ private fun filesWorkspaceOption(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            Spacer(Modifier.width(Spacing.sm))
-            Text(
-                text = "→",
-                style = MaterialTheme.typography.bodyMedium,
-                color = theme.textMuted,
-            )
         }
+        Spacer(Modifier.width(Spacing.sm))
+        Text(
+            text = "→",
+            style = MaterialTheme.typography.bodyMedium,
+            color = theme.textMuted,
+        )
     }
 }

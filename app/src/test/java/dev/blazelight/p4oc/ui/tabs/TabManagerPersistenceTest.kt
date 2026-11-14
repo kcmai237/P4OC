@@ -549,12 +549,6 @@ class TabManagerPersistenceTest {
     }
 
     @Test
-    fun `createPtyRequestForWorkspace uses target workspace cwd`() {
-        assertEquals("/repo", createPtyRequestForWorkspace(WorkspaceKey.Directory("/repo")).cwd)
-        assertEquals(null, createPtyRequestForWorkspace(WorkspaceKey.Global).cwd)
-    }
-
-    @Test
     fun `terminal routes are not persisted as resurrectable tabs`() {
         val manager = TabManager()
         manager.createTab(
@@ -567,6 +561,30 @@ class TabManagerPersistenceTest {
         val saved = manager.saveState()!!
 
         assertEquals(Screen.Sessions.route, saved.tabs.single().startRoute)
+    }
+
+    @Test
+    fun `unbound new chat route drops transient focus intent on save`() {
+        val manager = TabManager()
+        manager.createTab(
+            startRoute = Screen.Chat.createRoute("new/session with space", focusInput = true),
+            workspaceKey = WorkspaceKey.Directory("/repo"),
+            serverRef = server,
+            focus = true,
+        )
+
+        val saved = manager.saveState()!!
+
+        assertEquals("chat/new%2Fsession%20with%20space", saved.tabs.single().startRoute)
+        assertNull(saved.tabs.single().sessionId)
+
+        val restored = TabManager()
+        val result = restored.restoreState(saved, server)
+
+        assertTrue(result is RestoreResult.Restored)
+        val restoredTab = restored.tabs.value.single { !it.isPinnedHome }
+        assertEquals("chat/new%2Fsession%20with%20space", restoredTab.startRoute)
+        assertNull(restoredTab.sessionId)
     }
 }
 

@@ -1,24 +1,40 @@
 package dev.blazelight.p4oc.data.session
 
+import dev.blazelight.p4oc.core.lifecycle.ForegroundState
+import dev.blazelight.p4oc.core.log.AppLog
+import dev.blazelight.p4oc.core.network.DataSaverPolicy
 import dev.blazelight.p4oc.core.network.ServerConnectionRegistry
 import dev.blazelight.p4oc.data.remote.mapper.MessageMapper
 import dev.blazelight.p4oc.data.server.ActiveServerApiProvider
+import dev.blazelight.p4oc.data.workspace.UserWorkspaceRootsSource
 import dev.blazelight.p4oc.data.workspace.WorkspaceClient
+import dev.blazelight.p4oc.domain.model.OpenCodeEvent
+import dev.blazelight.p4oc.domain.server.ScopedEvent
 import dev.blazelight.p4oc.domain.server.ServerGeneration
 import dev.blazelight.p4oc.domain.server.WorkspaceKey
 import dev.blazelight.p4oc.domain.workspace.Workspace
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
 
+@Suppress("LongParameterList") // Collaborators plus test-injectable dispatchers; no grouping hides intent better.
 class SessionRepositoryProvider(
     private val activeServerApiProvider: ActiveServerApiProvider,
     private val messageMapper: MessageMapper,
     private val serverConnectionRegistry: ServerConnectionRegistry,
-    dispatcher: CoroutineDispatcher = Dispatchers.Default,
+    /** Persisted user roots; each repository is bound to its own server's roots at acquire. */
+    private val userWorkspaceRoots: UserWorkspaceRootsSource,
+    private val dispatcher: CoroutineDispatcher = Dispatchers.Default,
+    private val repositoryDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val json: Json = Json.Default,
+    private val foregroundState: ForegroundState = ForegroundState.AlwaysForeground,
+    private val incrementalMessages: Boolean = false,
+    private val dataSaverPolicy: DataSaverPolicy = DataSaverPolicy.Disabled,
 ) {
     data class Lease(
         val workspaceClient: WorkspaceClient,
@@ -35,11 +51,16 @@ class SessionRepositoryProvider(
         val workspaceClient: WorkspaceClient,
         val repository: SessionRepositoryImpl,
         val eventJob: Job,
+        val reconnectJob: Job,
         var refCount: Int,
     )
 
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
     private val entries = mutableMapOf<Key, Entry>()
+
+    private companion object {
+        const val TAG = "SessionRepositoryProvider"
+    }
 
     fun acquire(workspace: Workspace, generation: ServerGeneration): Lease = synchronized(this) {
         val key = workspace.toProviderKey(generation)
@@ -49,12 +70,22 @@ class SessionRepositoryProvider(
                 generation = generation,
                 apiProvider = activeServerApiProvider,
                 connectionState = serverConnectionRegistry.connectionState(workspace.server, generation),
+                json = json,
             )
-            val repository = SessionRepositoryImpl(workspaceClient, messageMapper)
+            val repository = SessionRepositoryImpl(
+                workspaceClient,
+                messageMapper,
+                dispatcher = repositoryDispatcher,
+                userWorkspaceRoots = { userWorkspaceRoots.roots(workspace.server) },
+                foregroundState = foregroundState,
+                incrementalMessages = incrementalMessages,
+                dataSaverPolicy = dataSaverPolicy,
+            )
             Entry(
                 workspaceClient = workspaceClient,
                 repository = repository,
                 eventJob = collectWorkspaceEvents(workspace, generation, repository),
+                reconnectJob = collectReconnects(workspace, generation, repository),
                 refCount = 0,
             )
         }
@@ -72,20 +103,94 @@ class SessionRepositoryProvider(
             entry
         }
         repositoryToClose.eventJob.cancel()
+        repositoryToClose.reconnectJob.cancel()
         repositoryToClose.repository.close()
     }
 
+    @Suppress("TooGenericExceptionCaught") // resilience guard: one bad event must not kill the collector
     private fun collectWorkspaceEvents(
         workspace: Workspace,
         generation: ServerGeneration,
         repository: SessionRepositoryImpl,
     ): Job = scope.launch {
         serverConnectionRegistry.events(workspace.server).collect { scopedEvent ->
-            if (scopedEvent.generation == generation &&
-                scopedEvent.workspaceKey == workspace.key
-            ) {
-                repository.acceptEvent(scopedEvent.event)
+            // The raw OpenCodeEvent.Connected carries no directory and never reaches the
+            // per-workspace fan-out. Reconnect is delivered exclusively via the registry's exact
+            // server-and-generation connection-state transition in [collectReconnects]; ignoring
+            // it here prevents a duplicate signal on global workspaces.
+            if (isDeliverableEvent(scopedEvent, workspace, generation)) {
+                try {
+                    repository.acceptEvent(scopedEvent.event)
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (e: Exception) {
+                    // A single malformed/unexpected event must never permanently kill this
+                    // workspace's live event delivery (issue #14: chat froze until re-entry).
+                    AppLog.e(
+                        TAG,
+                        "Dropping event ${scopedEvent.event::class.simpleName} for ${workspace.key}: ${e.message}",
+                        e,
+                    )
+                }
             }
+        }
+    }
+
+    /** True for a real event scoped to this exact server, generation, and workspace key. */
+    private fun isDeliverableEvent(
+        scopedEvent: ScopedEvent,
+        workspace: Workspace,
+        generation: ServerGeneration,
+    ): Boolean {
+        val shutdown = scopedEvent.event as? OpenCodeEvent.LocationShutdown
+        val sameSource = scopedEvent.serverRef == workspace.server && scopedEvent.generation == generation
+        val directoryMatch = scopedEvent.workspaceKey == workspace.key
+        val shutdownBroadcast = shutdown != null &&
+            (workspace.key == WorkspaceKey.Global || shutdown.directory == null)
+        return scopedEvent.event !is OpenCodeEvent.Connected && sameSource &&
+            (directoryMatch || shutdownBroadcast)
+    }
+
+    /**
+     * Delivers the canonical reconnect signal to this workspace repository from the exact
+     * server-and-generation event-source epoch, so open conversations self-heal after an SSE
+     * reconnect without navigation (issue #14: had to leave and re-enter to see updates).
+     *
+     * The epoch is monotonic and increments on every successful (re)connect of the active
+     * generation, so any later epoch increase is a fresh reconnect. The synthetic
+     * [OpenCodeEvent.Connected] carries no directory and never reaches the per-workspace fan-out;
+     * the raw event from the scoped stream is deliberately ignored in [collectWorkspaceEvents] to
+     * avoid a duplicate on global workspaces. The registry's exact-server exact-generation epoch
+     * increase is the single authoritative reconnect signal.
+     */
+    @Suppress("TooGenericExceptionCaught") // resilience guard: one bad repo must not stop a repo's delivery
+    private fun collectReconnects(
+        workspace: Workspace,
+        generation: ServerGeneration,
+        repository: SessionRepositoryImpl,
+    ): Job = scope.launch {
+        val epoch = serverConnectionRegistry.connectionEpoch(workspace.server, generation)
+        // The first emission is the baseline (no reconnect yet), so a generation already connected
+        // at collection start (epoch > 0) does not emit a redundant reconnect. Any later increase
+        // is a fresh reconnect.
+        var baselineSeen = false
+        var lastEpoch = 0L
+        epoch.collect { value ->
+            if (baselineSeen && value > lastEpoch) {
+                try {
+                    repository.acceptEvent(OpenCodeEvent.Connected)
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (e: Exception) {
+                    AppLog.e(
+                        TAG,
+                        "Reconnect delivery failed for ${workspace.key}: ${e.message}",
+                        e,
+                    )
+                }
+            }
+            lastEpoch = value
+            baselineSeen = true
         }
     }
 

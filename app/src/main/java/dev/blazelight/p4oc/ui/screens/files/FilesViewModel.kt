@@ -7,12 +7,18 @@ import dev.blazelight.p4oc.data.files.FileCapabilities
 import dev.blazelight.p4oc.data.files.FileOperationResult
 import dev.blazelight.p4oc.data.files.FileRepository
 import dev.blazelight.p4oc.data.files.FileWriteRequest
+import dev.blazelight.p4oc.data.vcs.WorkspaceChangesRepository
+import dev.blazelight.p4oc.data.vcs.WorkspaceChangesResult
+import dev.blazelight.p4oc.data.vcs.WorkspaceChangesSnapshot
+import dev.blazelight.p4oc.data.vcs.WorkspacePatch
 import dev.blazelight.p4oc.domain.model.FileNode
 import dev.blazelight.p4oc.domain.model.Symbol
 import dev.blazelight.p4oc.ui.screens.files.upload.UploadCoordinator
 import dev.blazelight.p4oc.ui.screens.files.upload.UploadQueueState
 import dev.blazelight.p4oc.ui.screens.files.upload.UploadSource
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -25,6 +31,7 @@ internal const val MAX_SAVED_EDIT_CONTENT_CHARS = 64 * 1024
 @Suppress("TooManyFunctions")
 class FilesViewModel constructor(
     private val fileRepository: FileRepository,
+    workspaceChangesRepository: WorkspaceChangesRepository,
     private val uploadCoordinator: UploadCoordinator,
     private val savedStateHandle: SavedStateHandle = SavedStateHandle(),
 ) : ViewModel() {
@@ -33,7 +40,8 @@ class FilesViewModel constructor(
         FilesUiState(
             currentPath = savedStateHandle[KEY_CURRENT_PATH] ?: ROOT_PATH,
             searchQuery = savedStateHandle[KEY_SEARCH_QUERY] ?: "",
-            isSearchActive = savedStateHandle[KEY_SEARCH_ACTIVE] ?: false,
+            isSearchActive = (savedStateHandle[KEY_SEARCH_ACTIVE] ?: false) &&
+                !(savedStateHandle[KEY_SYMBOL_MODE] ?: false),
             isSymbolMode = savedStateHandle[KEY_SYMBOL_MODE] ?: false,
             symbolQuery = savedStateHandle[KEY_SYMBOL_QUERY] ?: "",
         )
@@ -45,11 +53,23 @@ class FilesViewModel constructor(
     private val _symbolResults = MutableStateFlow<List<Symbol>>(emptyList())
     val symbolResults: StateFlow<List<Symbol>> = _symbolResults.asStateFlow()
 
+    private val _fileSearchResults = MutableStateFlow<List<FileNode>>(emptyList())
+    val fileSearchResults: StateFlow<List<FileNode>> = _fileSearchResults.asStateFlow()
+
     private val pathStack = savedStateHandle.get<ArrayList<String>>(KEY_PATH_STACK)?.toMutableList() ?: mutableListOf()
     private var loadFilesJob: Job? = null
     private var loadContentJob: Job? = null
     private var saveJob: Job? = null
     private var mutationJob: Job? = null
+    private var fileSearchJob: Job? = null
+    private var symbolSearchJob: Job? = null
+    private var fileSearchGeneration = 0L
+    private var symbolSearchGeneration = 0L
+    private val workspaceChanges = WorkspaceChangesStateHolder(
+        repository = workspaceChangesRepository,
+        scope = viewModelScope,
+    )
+    val changesState: StateFlow<WorkspaceChangesUiState> = workspaceChanges.state
 
     private val _editState = MutableStateFlow(restoredEditState())
     val editState: StateFlow<FileEditState> = _editState.asStateFlow()
@@ -59,7 +79,11 @@ class FilesViewModel constructor(
     init {
         loadCapabilities()
         loadFiles(savedStateHandle[KEY_CURRENT_PATH] ?: ROOT_PATH)
-        savedStateHandle.get<String>(KEY_SYMBOL_QUERY)?.takeIf { it.isNotBlank() }?.let(::searchSymbols)
+        if (_uiState.value.isSearchActive) {
+            _uiState.value.searchQuery.takeIf { it.isNotBlank() }?.let {
+                searchFiles(it, debounce = true)
+            }
+        }
     }
 
     private fun restoredEditState(): FileEditState {
@@ -119,7 +143,27 @@ class FilesViewModel constructor(
     }
 
     fun refresh() {
-        loadFiles(_uiState.value.currentPath)
+        val state = _uiState.value
+        when {
+            state.isSymbolMode -> searchSymbols(state.symbolQuery)
+            state.isSearchActive -> searchFiles(state.searchQuery, debounce = false)
+            else -> loadFiles(state.currentPath)
+        }
+    }
+
+    fun enterChanges() = workspaceChanges.enter()
+
+    fun exitChanges() = workspaceChanges.exit()
+
+    fun refreshChanges() = workspaceChanges.refresh()
+
+    fun toggleChange(path: String) = workspaceChanges.toggle(path)
+
+    fun retrySelectedPatch() = workspaceChanges.retrySelectedPatch()
+
+    override fun onCleared() {
+        workspaceChanges.release()
+        super.onCleared()
     }
 
     fun navigateTo(path: String) {
@@ -137,32 +181,80 @@ class FilesViewModel constructor(
 
     fun setSearchActive(active: Boolean) {
         savedStateHandle[KEY_SEARCH_ACTIVE] = active
-        _uiState.update { it.copy(isSearchActive = active) }
+        if (active) {
+            savedStateHandle[KEY_SYMBOL_MODE] = false
+            cancelSymbolSearch()
+            _symbolResults.value = emptyList()
+            _uiState.update {
+                it.copy(
+                    isSearchActive = true,
+                    isSymbolMode = false,
+                    symbolError = null,
+                )
+            }
+            searchFiles(_uiState.value.searchQuery, debounce = true)
+        } else {
+            cancelFileSearch()
+            _fileSearchResults.value = emptyList()
+            _uiState.update {
+                it.copy(
+                    isSearchActive = false,
+                    isFileSearchLoading = false,
+                    fileSearchError = null,
+                )
+            }
+        }
     }
 
     fun updateSearchQuery(query: String) {
         val bounded = query.take(MAX_PERSISTED_QUERY_CHARS)
         savedStateHandle[KEY_SEARCH_QUERY] = bounded
         _uiState.update { it.copy(searchQuery = bounded) }
+        if (_uiState.value.isSearchActive) {
+            searchFiles(bounded, debounce = true)
+        }
     }
 
     fun setSymbolMode(active: Boolean) {
+        if (active && _uiState.value.capabilitiesLoaded && !_uiState.value.capabilities.canSearchSymbols) return
         savedStateHandle[KEY_SYMBOL_MODE] = active
-        _uiState.update { it.copy(isSymbolMode = active) }
+        if (active) {
+            savedStateHandle[KEY_SEARCH_ACTIVE] = false
+            cancelFileSearch()
+            _fileSearchResults.value = emptyList()
+            _uiState.update {
+                it.copy(
+                    isSearchActive = false,
+                    isSymbolMode = true,
+                    isFileSearchLoading = false,
+                    fileSearchError = null,
+                )
+            }
+            searchSymbols(_uiState.value.symbolQuery)
+        } else {
+            cancelSymbolSearch()
+            _symbolResults.value = emptyList()
+            _uiState.update { it.copy(isSymbolMode = false, symbolError = null) }
+        }
     }
 
     fun updateSymbolQuery(query: String) {
         val bounded = query.take(MAX_PERSISTED_QUERY_CHARS)
         savedStateHandle[KEY_SYMBOL_QUERY] = bounded
         _uiState.update { it.copy(symbolQuery = bounded) }
-        searchSymbols(bounded)
+        if (_uiState.value.isSymbolMode) {
+            searchSymbols(bounded)
+        }
     }
 
     fun clearFilters() {
+        cancelFileSearch()
+        cancelSymbolSearch()
         savedStateHandle[KEY_SEARCH_ACTIVE] = false
         savedStateHandle[KEY_SYMBOL_MODE] = false
         savedStateHandle[KEY_SEARCH_QUERY] = ""
         savedStateHandle[KEY_SYMBOL_QUERY] = ""
+        _fileSearchResults.value = emptyList()
         _symbolResults.value = emptyList()
         _uiState.update {
             it.copy(
@@ -170,6 +262,8 @@ class FilesViewModel constructor(
                 isSymbolMode = false,
                 searchQuery = "",
                 symbolQuery = "",
+                isFileSearchLoading = false,
+                fileSearchError = null,
                 symbolError = null,
             )
         }
@@ -219,22 +313,71 @@ class FilesViewModel constructor(
 
     private fun loadCapabilities() {
         viewModelScope.launch {
+            val capabilities = fileRepository.capabilities()
+            if (_uiState.value.isSymbolMode) {
+                if (capabilities.canSearchSymbols) {
+                    _uiState.value.symbolQuery.takeIf { it.isNotBlank() }?.let(::searchSymbols)
+                } else {
+                    setSymbolMode(false)
+                    savedStateHandle[KEY_SYMBOL_MODE] = false
+                }
+            }
             _uiState.update {
-                it.copy(
-                    capabilities = fileRepository.capabilities(),
-                    capabilitiesLoaded = true,
-                )
+                it.copy(capabilities = capabilities, capabilitiesLoaded = true)
+            }
+        }
+    }
+
+    private fun searchFiles(query: String, debounce: Boolean) {
+        cancelFileSearch()
+        val generation = fileSearchGeneration
+        _fileSearchResults.value = emptyList()
+        if (query.isBlank()) {
+            _uiState.update {
+                it.copy(isFileSearchLoading = false, fileSearchError = null)
+            }
+            return
+        }
+
+        _uiState.update {
+            it.copy(isFileSearchLoading = true, fileSearchError = null)
+        }
+        fileSearchJob = viewModelScope.launch {
+            if (debounce) delay(FILE_SEARCH_DEBOUNCE_MS)
+            val result = fileRepository.searchFiles(query)
+            if (!isCurrentFileSearch(generation, query)) return@launch
+            when (result) {
+                is FileOperationResult.Ok -> {
+                    _fileSearchResults.value = result.data
+                    _uiState.update {
+                        it.copy(isFileSearchLoading = false, fileSearchError = null)
+                    }
+                }
+                is FileOperationResult.Conflict -> {
+                    _uiState.update {
+                        it.copy(isFileSearchLoading = false, fileSearchError = result.message)
+                    }
+                }
+                is FileOperationResult.Failed -> {
+                    _uiState.update {
+                        it.copy(isFileSearchLoading = false, fileSearchError = result.message)
+                    }
+                }
             }
         }
     }
 
     fun searchSymbols(query: String) {
-        viewModelScope.launch {
-            _symbolResults.value = emptyList()
-            _uiState.update { it.copy(symbolError = null) }
-            if (query.isBlank()) return@launch
+        cancelSymbolSearch()
+        val generation = symbolSearchGeneration
+        _symbolResults.value = emptyList()
+        _uiState.update { it.copy(symbolError = null) }
+        if (query.isBlank()) return
 
-            when (val result = fileRepository.searchSymbols(query)) {
+        symbolSearchJob = viewModelScope.launch {
+            val result = fileRepository.searchSymbols(query)
+            if (!isCurrentSymbolSearch(generation, query)) return@launch
+            when (result) {
                 is FileOperationResult.Ok -> {
                     _symbolResults.value = result.data
                 }
@@ -244,7 +387,35 @@ class FilesViewModel constructor(
         }
     }
 
-    fun loadFileContent(path: String) {
+    private fun cancelFileSearch() {
+        fileSearchGeneration++
+        fileSearchJob?.cancel()
+        fileSearchJob = null
+    }
+
+    private fun cancelSymbolSearch() {
+        symbolSearchGeneration++
+        symbolSearchJob?.cancel()
+        symbolSearchJob = null
+    }
+
+    private fun isCurrentFileSearch(generation: Long, query: String): Boolean {
+        val state = _uiState.value
+        return generation == fileSearchGeneration &&
+            state.isSearchActive &&
+            state.searchQuery == query
+    }
+
+    private fun isCurrentSymbolSearch(generation: Long, query: String): Boolean {
+        val state = _uiState.value
+        return generation == symbolSearchGeneration &&
+            state.isSymbolMode &&
+            state.symbolQuery == query
+    }
+
+    fun loadFileContent(path: String) = loadFileContent(path, replaceEditsOnSuccess = false)
+
+    private fun loadFileContent(path: String, replaceEditsOnSuccess: Boolean) {
         loadContentJob?.cancel()
         loadContentJob = viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, fileContent = null, error = null) }
@@ -258,7 +429,7 @@ class FilesViewModel constructor(
                     // the decision of whether to enter edit mode; the baseline is only
                     // consumed when it does.
                     updateEditState { current ->
-                        if (current.path == path && current.isDirty) {
+                        if (current.path == path && current.isDirty && !replaceEditsOnSuccess) {
                             current
                         } else {
                             FileEditState(
@@ -328,7 +499,7 @@ class FilesViewModel constructor(
     fun reloadFromServer() {
         val path = _editState.value.path ?: return
         updateEditState { it.copy(conflict = null) }
-        loadFileContent(path)
+        loadFileContent(path, replaceEditsOnSuccess = true)
     }
 
     /** Re-issues the write with no baseline hash, suppressing stale-write detection. */
@@ -522,6 +693,7 @@ class FilesViewModel constructor(
     }
 
     companion object {
+        private const val FILE_SEARCH_DEBOUNCE_MS = 250L
         private const val MAX_PERSISTED_QUERY_CHARS = 1_024
         private const val MAX_PERSISTED_PATH_DEPTH = 128
         const val ROOT_PATH = ""
@@ -544,6 +716,296 @@ class FilesViewModel constructor(
     }
 }
 
+private class WorkspaceChangesStateHolder(
+    private val repository: WorkspaceChangesRepository,
+    private val scope: CoroutineScope,
+) {
+    private var snapshotJob: Job? = null
+    private var selectionJob: Job? = null
+    private var snapshotGeneration = 0L
+    private var selectionGeneration = 0L
+    private var publishedSnapshotGeneration: Long? = null
+    private var diffCache: ChangesDiffCache? = null
+
+    private val mutableState = MutableStateFlow(WorkspaceChangesUiState())
+    val state: StateFlow<WorkspaceChangesUiState> = mutableState.asStateFlow()
+
+    fun enter() {
+        if (!mutableState.value.isActive) {
+            cancelSelection()
+            diffCache = null
+            publishedSnapshotGeneration = null
+            mutableState.value = WorkspaceChangesUiState(
+                isActive = true,
+                isLoading = true,
+            )
+            loadSnapshot()
+        }
+    }
+
+    fun exit() {
+        release()
+        mutableState.value = WorkspaceChangesUiState()
+    }
+
+    fun release() {
+        snapshotGeneration++
+        snapshotJob?.cancel()
+        snapshotJob = null
+        cancelSelection()
+        diffCache = null
+        publishedSnapshotGeneration = null
+    }
+
+    fun refresh() {
+        if (mutableState.value.isActive) {
+            loadSnapshot()
+        }
+    }
+
+    fun toggle(path: String) {
+        val current = mutableState.value
+        val canSelect = current.isActive && current.snapshot?.changes?.any { it.file == path } == true
+        when {
+            !canSelect -> Unit
+            current.selectedPath == path -> collapseSelection()
+            else -> loadSelectedPatch(path = path, useCache = true)
+        }
+    }
+
+    /** Retries only a retryable diff failure; stale, unavailable, and bounded states require refresh. */
+    fun retrySelectedPatch() {
+        val current = mutableState.value
+        val failure = retryableFailure(current)
+        if (failure != null) {
+            loadSelectedPatch(path = checkNotNull(failure.path), useCache = false)
+        }
+    }
+
+    private fun retryableFailure(current: WorkspaceChangesUiState): WorkspaceChangesPatchState? {
+        val failure = current.patchState.takeIf(WorkspaceChangesPatchState::isRetryable)
+        val failurePath = failure?.path
+        val ownsSnapshot = current.isActive && current.snapshot != null
+        return failure?.takeIf { ownsSnapshot && current.selectedPath == failurePath }
+    }
+
+    private fun collapseSelection() {
+        cancelSelection()
+        mutableState.update {
+            it.copy(
+                selectedPath = null,
+                patchState = WorkspaceChangesPatchState.None,
+            )
+        }
+    }
+
+    private fun loadSnapshot() {
+        snapshotGeneration++
+        val generation = snapshotGeneration
+        snapshotJob?.cancel()
+        val retainingSnapshot = mutableState.value.snapshot != null
+        mutableState.update {
+            it.copy(
+                isLoading = !retainingSnapshot,
+                isRefreshing = retainingSnapshot,
+                failure = if (retainingSnapshot) it.failure else null,
+                refreshFailed = null,
+            )
+        }
+        snapshotJob = scope.launch {
+            val result = repository.loadSnapshot()
+            if (!isCurrentSnapshotLoad(generation)) return@launch
+
+            when (result) {
+                is WorkspaceChangesResult.Success -> publishSnapshot(
+                    generation = generation,
+                    snapshot = result.data,
+                )
+                WorkspaceChangesResult.Unsupported -> publishSnapshotFailure(
+                    generation,
+                    WorkspaceChangesFailureKind.Unsupported,
+                )
+                WorkspaceChangesResult.TooLarge -> publishSnapshotFailure(
+                    generation,
+                    WorkspaceChangesFailureKind.TooLarge,
+                )
+                WorkspaceChangesResult.Malformed -> publishSnapshotFailure(
+                    generation,
+                    WorkspaceChangesFailureKind.Malformed,
+                )
+                WorkspaceChangesResult.Stale -> publishSnapshotFailure(
+                    generation,
+                    WorkspaceChangesFailureKind.Stale,
+                )
+                WorkspaceChangesResult.AuthorizationFailure -> publishSnapshotFailure(
+                    generation,
+                    WorkspaceChangesFailureKind.AuthorizationFailure,
+                )
+                WorkspaceChangesResult.HttpFailure -> publishSnapshotFailure(
+                    generation,
+                    WorkspaceChangesFailureKind.HttpFailure,
+                )
+                WorkspaceChangesResult.NetworkFailure -> publishSnapshotFailure(
+                    generation,
+                    WorkspaceChangesFailureKind.NetworkFailure,
+                )
+                WorkspaceChangesResult.Failure -> publishSnapshotFailure(
+                    generation,
+                    WorkspaceChangesFailureKind.Failure,
+                )
+            }
+        }
+    }
+
+    private fun publishSnapshot(
+        generation: Long,
+        snapshot: WorkspaceChangesSnapshot,
+    ) {
+        if (isCurrentSnapshotLoad(generation)) {
+            cancelSelection()
+            diffCache = null
+            publishedSnapshotGeneration = generation
+            mutableState.update {
+                it.copy(
+                    isLoading = false,
+                    isRefreshing = false,
+                    snapshot = snapshot,
+                    failure = null,
+                    refreshFailed = null,
+                    selectedPath = null,
+                    patchState = WorkspaceChangesPatchState.None,
+                )
+            }
+        }
+    }
+
+    private fun publishSnapshotFailure(
+        generation: Long,
+        failure: WorkspaceChangesFailureKind,
+    ) {
+        if (isCurrentSnapshotLoad(generation)) {
+            mutableState.update { current ->
+                if (current.snapshot == null) {
+                    current.copy(
+                        isLoading = false,
+                        isRefreshing = false,
+                        failure = failure,
+                        refreshFailed = null,
+                    )
+                } else {
+                    current.copy(
+                        isLoading = false,
+                        isRefreshing = false,
+                        failure = null,
+                        refreshFailed = failure,
+                    )
+                }
+            }
+        }
+    }
+
+    private fun isCurrentSnapshotLoad(generation: Long): Boolean =
+        generation == snapshotGeneration && mutableState.value.isActive
+
+    private fun loadSelectedPatch(path: String, useCache: Boolean) {
+        val currentSnapshotGeneration = publishedSnapshotGeneration ?: return
+        cancelSelection()
+        val currentSelectionGeneration = selectionGeneration
+        mutableState.update {
+            it.copy(
+                selectedPath = path,
+                patchState = WorkspaceChangesPatchState.Loading,
+            )
+        }
+
+        val cached = diffCache?.takeIf {
+            useCache && it.snapshotGeneration == currentSnapshotGeneration
+        }
+        if (cached != null) {
+            publishSelectedPatch(path, patchFrom(cached.patches, path))
+        } else {
+            loadDiff(
+                path = path,
+                selectionGeneration = currentSelectionGeneration,
+                snapshotGeneration = currentSnapshotGeneration,
+            )
+        }
+    }
+
+    private fun loadDiff(
+        path: String,
+        selectionGeneration: Long,
+        snapshotGeneration: Long,
+    ) {
+        selectionJob = scope.launch {
+            val result = repository.loadDiff()
+            if (!isCurrentSelection(selectionGeneration, snapshotGeneration, path)) {
+                return@launch
+            }
+
+            val patchState = when (result) {
+                is WorkspaceChangesResult.Success -> {
+                    diffCache = ChangesDiffCache(
+                        snapshotGeneration = snapshotGeneration,
+                        patches = result.data,
+                    )
+                    patchFrom(result.data, path)
+                }
+                WorkspaceChangesResult.TooLarge -> WorkspaceChangesPatchState.TooLarge(path)
+                WorkspaceChangesResult.Stale -> WorkspaceChangesPatchState.Stale(path)
+                WorkspaceChangesResult.Unsupported -> WorkspaceChangesPatchState.Unsupported(path)
+                WorkspaceChangesResult.Malformed -> WorkspaceChangesPatchState.Malformed(path)
+                WorkspaceChangesResult.AuthorizationFailure ->
+                    WorkspaceChangesPatchState.AuthorizationFailure(path)
+                WorkspaceChangesResult.HttpFailure -> WorkspaceChangesPatchState.HttpFailure(path)
+                WorkspaceChangesResult.NetworkFailure -> WorkspaceChangesPatchState.NetworkFailure(path)
+                WorkspaceChangesResult.Failure -> WorkspaceChangesPatchState.Failure(path)
+            }
+            if (isCurrentSelection(selectionGeneration, snapshotGeneration, path)) {
+                publishSelectedPatch(path, patchState)
+            }
+        }
+    }
+
+    private fun isCurrentSelection(
+        selectionGeneration: Long,
+        snapshotGeneration: Long,
+        path: String,
+    ): Boolean {
+        val current = mutableState.value
+        return selectionGeneration == this.selectionGeneration &&
+            snapshotGeneration == publishedSnapshotGeneration &&
+            current.isActive &&
+            current.selectedPath == path
+    }
+
+    private fun publishSelectedPatch(path: String, patchState: WorkspaceChangesPatchState) {
+        mutableState.update { current ->
+            if (current.isActive && current.selectedPath == path) {
+                current.copy(patchState = patchState)
+            } else {
+                current
+            }
+        }
+    }
+
+    private fun patchFrom(
+        patches: Map<String, WorkspacePatch>,
+        path: String,
+    ): WorkspaceChangesPatchState = when (val patch = patches[path] ?: WorkspacePatch.Stale) {
+        is WorkspacePatch.Content -> WorkspaceChangesPatchState.Content(path, patch.text)
+        WorkspacePatch.Unavailable -> WorkspaceChangesPatchState.Unavailable(path)
+        WorkspacePatch.TooLarge -> WorkspaceChangesPatchState.TooLarge(path)
+        WorkspacePatch.Stale -> WorkspaceChangesPatchState.Stale(path)
+    }
+
+    private fun cancelSelection() {
+        selectionGeneration++
+        selectionJob?.cancel()
+        selectionJob = null
+    }
+}
+
 data class FilesUiState(
     val isLoading: Boolean = false,
     val files: List<FileNode> = emptyList(),
@@ -552,6 +1014,8 @@ data class FilesUiState(
     val error: String? = null,
     val pathRestoreError: String? = null,
     val symbolError: String? = null,
+    val fileSearchError: String? = null,
+    val isFileSearchLoading: Boolean = false,
     val searchQuery: String = "",
     val isSearchActive: Boolean = false,
     val isSymbolMode: Boolean = false,
@@ -560,6 +1024,93 @@ data class FilesUiState(
     val capabilitiesLoaded: Boolean = false,
     val isMutating: Boolean = false,
     val mutationMessage: String? = null,
+)
+
+data class WorkspaceChangesUiState(
+    val isActive: Boolean = false,
+    val isLoading: Boolean = false,
+    val isRefreshing: Boolean = false,
+    val snapshot: WorkspaceChangesSnapshot? = null,
+    val failure: WorkspaceChangesFailureKind? = null,
+    val refreshFailed: WorkspaceChangesFailureKind? = null,
+    val selectedPath: String? = null,
+    val patchState: WorkspaceChangesPatchState = WorkspaceChangesPatchState.None,
+)
+
+enum class WorkspaceChangesFailureKind {
+    Unsupported,
+    TooLarge,
+    Malformed,
+    Stale,
+    AuthorizationFailure,
+    HttpFailure,
+    NetworkFailure,
+    Failure,
+}
+
+sealed interface WorkspaceChangesPatchState {
+    data object None : WorkspaceChangesPatchState
+
+    data object Loading : WorkspaceChangesPatchState
+
+    data class Content(
+        val path: String,
+        val text: String,
+    ) : WorkspaceChangesPatchState
+
+    data class Unavailable(val path: String) : WorkspaceChangesPatchState
+
+    data class TooLarge(val path: String) : WorkspaceChangesPatchState
+
+    data class Stale(val path: String) : WorkspaceChangesPatchState
+
+    data class Unsupported(val path: String) : WorkspaceChangesPatchState
+
+    data class Malformed(val path: String) : WorkspaceChangesPatchState
+
+    data class AuthorizationFailure(val path: String) : WorkspaceChangesPatchState
+
+    data class HttpFailure(val path: String) : WorkspaceChangesPatchState
+
+    data class NetworkFailure(val path: String) : WorkspaceChangesPatchState
+
+    data class Failure(val path: String) : WorkspaceChangesPatchState
+}
+
+private val WorkspaceChangesPatchState.path: String?
+    get() = when (this) {
+        WorkspaceChangesPatchState.None,
+        WorkspaceChangesPatchState.Loading -> null
+        is WorkspaceChangesPatchState.Content -> path
+        is WorkspaceChangesPatchState.Unavailable -> path
+        is WorkspaceChangesPatchState.TooLarge -> path
+        is WorkspaceChangesPatchState.Stale -> path
+        is WorkspaceChangesPatchState.Unsupported -> path
+        is WorkspaceChangesPatchState.Malformed -> path
+        is WorkspaceChangesPatchState.AuthorizationFailure -> path
+        is WorkspaceChangesPatchState.HttpFailure -> path
+        is WorkspaceChangesPatchState.NetworkFailure -> path
+        is WorkspaceChangesPatchState.Failure -> path
+    }
+
+private fun WorkspaceChangesPatchState.isRetryable(): Boolean = when (this) {
+    is WorkspaceChangesPatchState.Malformed,
+    is WorkspaceChangesPatchState.Stale,
+    is WorkspaceChangesPatchState.AuthorizationFailure,
+    is WorkspaceChangesPatchState.HttpFailure,
+    is WorkspaceChangesPatchState.NetworkFailure,
+    is WorkspaceChangesPatchState.Failure -> true
+    WorkspaceChangesPatchState.None,
+    WorkspaceChangesPatchState.Loading,
+    is WorkspaceChangesPatchState.Content,
+    is WorkspaceChangesPatchState.Unavailable,
+    is WorkspaceChangesPatchState.TooLarge,
+    is WorkspaceChangesPatchState.Unsupported -> false
+}
+
+private data class ChangesDiffCache(
+    val snapshotGeneration: Long,
+    val patches: Map<String, WorkspacePatch>,
 )
 
 /**

@@ -51,6 +51,8 @@ data class ModelInfo(
     val id: String,
     val name: String,
     val providerId: String,
+    /** The provider's own display name; falls back to [providerId] when the server omits one. */
+    val providerName: String = providerId,
     val contextLength: Int = 0,
     val inputCostPer1k: Double = 0.0,
     val outputCostPer1k: Double = 0.0,
@@ -63,6 +65,7 @@ data class ModelControlsState(
     val models: List<ModelInfo> = emptyList(),
     val favorites: Set<String> = emptySet(),
     val selectedModelId: String? = null,
+    val canSetDefaultModel: Boolean = true,
     val isLoading: Boolean = false,
     val error: String? = null,
     val loadFailed: Boolean = false,
@@ -76,7 +79,9 @@ class ModelControlsViewModel constructor(
     serverConnectionRegistry: dev.blazelight.p4oc.core.network.ServerConnectionRegistry? = null,
 ) : ViewModel() {
 
-    private val _state = MutableStateFlow(ModelControlsState())
+    private val _state = MutableStateFlow(
+        ModelControlsState(canSetDefaultModel = workspaceClient.supportsGlobalModelConfig)
+    )
     val state: StateFlow<ModelControlsState> = _state.asStateFlow()
 
     init {
@@ -104,6 +109,7 @@ class ModelControlsViewModel constructor(
                                 id = dto.id,
                                 name = dto.name,
                                 providerId = dto.providerId,
+                                providerName = provider.name.takeIf { it.isNotBlank() } ?: dto.providerId,
                                 contextLength = dto.limit?.context ?: dto.contextLength ?: 0,
                                 inputCostPer1k = dto.cost?.input ?: dto.inputCostPer1k ?: 0.0,
                                 outputCostPer1k = dto.cost?.output ?: dto.outputCostPer1k ?: 0.0,
@@ -156,7 +162,11 @@ class ModelControlsViewModel constructor(
             when (safeApiCall { workspaceClient.updateCurrentModel("${model.providerId}/${model.id}") }) {
                 is ApiResult.Success -> {
                     _state.update { it.copy(selectedModelId = modelId, error = null, loadFailed = false) }
-                    modelSelectionCoordinator.publishActiveModel(selectedModel)
+                    modelSelectionCoordinator.publishActiveModel(
+                        workspaceClient.workspace,
+                        workspaceClient.generation,
+                        selectedModel,
+                    )
                 }
                 is ApiResult.Error -> {
                     _state.update {
@@ -193,7 +203,8 @@ internal enum class ModelListContentState { MODELS, EMPTY, NO_RESULTS }
 internal fun filteredModels(state: ModelControlsState): List<ModelInfo> = state.models.filter { model ->
     val matchesSearch = state.searchQuery.isBlank() ||
         model.name.contains(state.searchQuery, ignoreCase = true) ||
-        model.id.contains(state.searchQuery, ignoreCase = true)
+        model.id.contains(state.searchQuery, ignoreCase = true) ||
+        model.providerName.contains(state.searchQuery, ignoreCase = true)
     val matchesProvider = state.filterProvider == null || model.providerId == state.filterProvider
     matchesSearch && matchesProvider
 }.sortedByDescending { it.isFavorite }
@@ -221,7 +232,7 @@ fun ModelControlsScreen(
     }
 
     val providers = remember(state.models) {
-        state.models.map { it.providerId }.distinct()
+        state.models.map { it.providerId to it.providerName }.distinct().sortedBy { it.second.lowercase() }
     }
 
     val theme = LocalOpenCodeTheme.current
@@ -251,6 +262,14 @@ fun ModelControlsScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
+            if (!state.canSetDefaultModel) {
+                Text(
+                    text = stringResource(R.string.v2_model_settings_info),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = theme.textMuted,
+                    modifier = Modifier.padding(horizontal = Spacing.xl, vertical = Spacing.sm),
+                )
+            }
             SearchBar(
                 query = state.searchQuery,
                 onQueryChange = viewModel::updateSearchQuery,
@@ -339,6 +358,7 @@ fun ModelControlsScreen(
                             ModelCard(
                                 model = model,
                                 isSelected = model.id == state.selectedModelId,
+                                enabled = state.canSetDefaultModel,
                                 onSelect = { viewModel.selectModel(model.id) },
                                 onToggleFavorite = { viewModel.toggleFavorite(model.id) }
                             )
@@ -359,6 +379,7 @@ fun ModelControlsScreen(
                             ModelCard(
                                 model = model,
                                 isSelected = model.id == state.selectedModelId,
+                                enabled = state.canSetDefaultModel,
                                 onSelect = { viewModel.selectModel(model.id) },
                                 onToggleFavorite = { viewModel.toggleFavorite(model.id) }
                             )
@@ -408,7 +429,7 @@ private fun SearchBar(
 
 @Composable
 private fun ProviderFilterChips(
-    providers: List<String>,
+    providers: List<Pair<String, String>>,
     selected: String?,
     onSelect: (String?) -> Unit,
     modifier: Modifier = Modifier
@@ -423,11 +444,11 @@ private fun ProviderFilterChips(
             label = { Text(stringResource(R.string.all)) },
             shape = RectangleShape
         )
-        providers.forEach { provider ->
+        providers.forEach { (providerId, label) ->
             FilterChip(
-                selected = selected == provider,
-                onClick = { onSelect(if (selected == provider) null else provider) },
-                label = { Text(provider) },
+                selected = selected == providerId,
+                onClick = { onSelect(if (selected == providerId) null else providerId) },
+                label = { Text(label) },
                 shape = RectangleShape
             )
         }
@@ -440,6 +461,7 @@ private fun ProviderFilterChips(
 internal fun ModelCard(
     model: ModelInfo,
     isSelected: Boolean,
+    enabled: Boolean,
     onSelect: () -> Unit,
     onToggleFavorite: () -> Unit
 ) {
@@ -453,12 +475,14 @@ internal fun ModelCard(
             .fillMaxWidth()
             .selectable(
                 selected = isSelected,
+                enabled = enabled,
                 onClick = onSelect,
                 role = Role.RadioButton
             )
             .semantics {
                 if (isSelected) stateDescription = currentModelDescription
             },
+        shape = RectangleShape,
         colors = CardDefaults.cardColors(
             containerColor = if (isSelected) {
                 theme.accent.copy(alpha = 0.2f)
@@ -488,7 +512,7 @@ internal fun ModelCard(
                         fontWeight = FontWeight.Medium
                     )
                     Text(
-                        text = model.providerId,
+                        text = model.providerName,
                         style = MaterialTheme.typography.bodySmall,
                         color = theme.textMuted
                     )

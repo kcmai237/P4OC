@@ -4,6 +4,8 @@ package dev.blazelight.p4oc.data.workspace
 
 import dev.blazelight.p4oc.core.network.ConnectionState
 import dev.blazelight.p4oc.core.network.OpenCodeApi
+import dev.blazelight.p4oc.core.network.V2FormInfo
+import dev.blazelight.p4oc.core.network.V2WorkspaceOpenCodeApi
 import dev.blazelight.p4oc.data.remote.dto.AddMcpServerRequest
 import dev.blazelight.p4oc.data.remote.dto.AgentDto
 import dev.blazelight.p4oc.data.remote.dto.CommandDto
@@ -32,36 +34,95 @@ import dev.blazelight.p4oc.data.remote.dto.RevertSessionRequest
 import dev.blazelight.p4oc.data.remote.dto.SendMessageRequest
 import dev.blazelight.p4oc.data.remote.dto.SessionDto
 import dev.blazelight.p4oc.data.remote.dto.SessionStatusDto
-import dev.blazelight.p4oc.data.remote.dto.SnapshotFileDiffDto
 import dev.blazelight.p4oc.data.remote.dto.ShellCommandRequest
+import dev.blazelight.p4oc.data.remote.dto.SnapshotFileDiffDto
 import dev.blazelight.p4oc.data.remote.dto.SymbolDto
 import dev.blazelight.p4oc.data.remote.dto.TodoDto
 import dev.blazelight.p4oc.data.remote.dto.UpdateSessionRequest
 import dev.blazelight.p4oc.data.remote.dto.VcsInfoDto
+import dev.blazelight.p4oc.data.remote.dto.WorkspaceVcsDiffDto
+import dev.blazelight.p4oc.data.remote.dto.WorkspaceVcsInfoDto
+import dev.blazelight.p4oc.data.remote.dto.WorkspaceVcsStatusDto
 import dev.blazelight.p4oc.data.server.ActiveServerApiProvider
+import dev.blazelight.p4oc.data.server.StaleWorkspaceClientException
+import dev.blazelight.p4oc.data.vcs.VcsDiffMode
 import dev.blazelight.p4oc.domain.server.ServerGeneration
 import dev.blazelight.p4oc.domain.workspace.Workspace
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.serialization.SerializationException
-
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.Json
+import okhttp3.ResponseBody
+import okio.Buffer
+import okio.ByteString.Companion.toByteString
 import retrofit2.HttpException
 import java.io.IOException
+import java.nio.ByteBuffer
+import java.nio.charset.CharacterCodingException
+import java.nio.charset.CodingErrorAction
+import java.nio.charset.StandardCharsets
+
+private const val BOUNDED_FILE_READ_CHUNK_BYTES = 8L * 1024
+private const val FILE_RESPONSE_TOO_LARGE_MESSAGE = "File response exceeds the allowed size"
+private const val VCS_RESPONSE_TOO_LARGE_MESSAGE = "VCS response exceeds the allowed size"
+private const val INVALID_UTF8_RESPONSE_MESSAGE = "Response body is not valid UTF-8"
+internal const val VCS_INFO_RESPONSE_LIMIT_BYTES = 64L * 1024
+internal const val VCS_STATUS_RESPONSE_LIMIT_BYTES = 2L * 1024 * 1024
+internal const val VCS_DIFF_RESPONSE_LIMIT_BYTES = 12L * 1024 * 1024
+
+internal class BoundedResponseTooLargeException(message: String) : IOException(message)
 
 class WorkspaceClient(
     override val workspace: Workspace,
     val generation: ServerGeneration,
     private val apiProvider: ActiveServerApiProvider,
     val connectionState: StateFlow<ConnectionState>,
+    private val json: Json = Json.Default,
 ) : SessionWorkspaceClient {
     private val api: OpenCodeApi
         get() = apiProvider.apiFor(workspace.server, generation)
+
+    // A generation is bound to one server connection, so its protocol never changes. Remember it so
+    // composition and lifecycle callbacks can still read capabilities after the generation retires.
+    @Volatile
+    private var resolvedUsesV2Api: Boolean? = null
+    private val usesV2Api: Boolean
+        get() = resolvedUsesV2Api ?: try {
+            (api is V2WorkspaceOpenCodeApi).also { resolvedUsesV2Api = it }
+        } catch (_: StaleWorkspaceClientException) {
+            false
+        }
+
+    val supportsV2Forms: Boolean
+        get() = usesV2Api
+    val supportsGlobalModelConfig: Boolean
+        get() = !usesV2Api
+    override val supportsSessionSharing: Boolean
+        get() = !usesV2Api
+    override val streamsEphemeralContent: Boolean
+        get() = usesV2Api
+    val supportsSymbolSearch: Boolean
+        get() = !usesV2Api
+    val supportsSessionTodos: Boolean
+        get() = !usesV2Api
     private val directory: String? = workspace.directory
+    private val strictVcsJson = Json {
+        ignoreUnknownKeys = true
+        isLenient = false
+        coerceInputValues = false
+    }
 
     override suspend fun listProjects(): List<ProjectDto> = api.listProjects(directory = null, workspace = null)
 
     /** Probes a directory returned by [listProjects] using that project as API scope. */
     suspend fun listProjectFiles(projectDirectory: String, path: String = "."): List<FileNodeDto> =
         api.listFiles(path, projectDirectory, workspace = null)
+
+    /** Lists an absolute server directory, routed at that path's filesystem root (never a tab directory). */
+    suspend fun listServerDirectory(root: String, absolutePath: String): List<FileNodeDto> =
+        api.listFiles(path = absolutePath, directory = root, workspace = null)
 
     override suspend fun listSessions(
         directory: String?,
@@ -87,6 +148,40 @@ class WorkspaceClient(
     override suspend fun getSession(id: String): SessionDto = api.getSession(id, directory, workspace = null)
 
     suspend fun getVcsInfo(): VcsInfoDto = api.getVcsInfo(directory, workspace = null)
+
+    internal suspend fun loadWorkspaceVcsInfo(): WorkspaceVcsInfoDto =
+        api.getVcsInfoRaw(directory, workspace = null).decodeBoundedJson(
+            maxResponseBytes = VCS_INFO_RESPONSE_LIMIT_BYTES,
+            tooLargeMessage = VCS_RESPONSE_TOO_LARGE_MESSAGE,
+        ) { content ->
+            strictVcsJson.decodeFromString(content)
+        }
+
+    internal suspend fun loadWorkspaceVcsStatus(): List<WorkspaceVcsStatusDto> =
+        api.getVcsStatusRaw(directory, workspace = null).decodeBoundedJson(
+            maxResponseBytes = VCS_STATUS_RESPONSE_LIMIT_BYTES,
+            tooLargeMessage = VCS_RESPONSE_TOO_LARGE_MESSAGE,
+        ) { content ->
+            strictVcsJson.decodeFromString(content)
+        }
+
+    internal suspend fun loadWorkspaceVcsDiff(
+        mode: VcsDiffMode,
+        context: Int,
+    ): List<WorkspaceVcsDiffDto> {
+        require(context >= 0) { "context must be non-negative" }
+        return api.getVcsDiffRaw(
+            mode = mode,
+            context = context,
+            directory = directory,
+            workspace = null,
+        ).decodeBoundedJson(
+            maxResponseBytes = VCS_DIFF_RESPONSE_LIMIT_BYTES,
+            tooLargeMessage = VCS_RESPONSE_TOO_LARGE_MESSAGE,
+        ) { content ->
+            strictVcsJson.decodeFromString(content)
+        }
+    }
 
     suspend fun getAgents(): List<AgentDto> = api.getAgents(directory, workspace = null)
 
@@ -136,10 +231,10 @@ class WorkspaceClient(
 
     suspend fun getSessionTodos(id: String): List<TodoDto> = api.getSessionTodos(id, directory, workspace = null)
 
-    suspend fun forkSession(id: String, request: ForkSessionRequest): SessionDto =
+    override suspend fun forkSession(id: String, request: ForkSessionRequest): SessionDto =
         api.forkSession(id, request, directory, workspace = null)
 
-    suspend fun initSession(id: String, request: InitSessionRequest): Boolean =
+    override suspend fun initSession(id: String, request: InitSessionRequest): Boolean =
         api.initSession(id, request, directory, workspace = null)
 
     override suspend fun shareSession(id: String): SessionDto = api.shareSession(id, directory, workspace = null)
@@ -156,8 +251,12 @@ class WorkspaceClient(
     suspend fun getSessionDiff(id: String, messageId: String? = null): List<SnapshotFileDiffDto> =
         api.getSessionDiff(id, messageId, directory, workspace = null)
 
-    suspend fun getMessages(sessionId: String, limit: Int? = null): List<MessageWrapperDto> =
-        api.getMessages(sessionId, limit, before = null, directory = directory, workspace = null)
+    suspend fun getMessages(
+        sessionId: String,
+        limit: Int? = null,
+        before: String? = null,
+    ): List<MessageWrapperDto> =
+        api.getMessages(sessionId, limit, before = before, directory = directory, workspace = null)
 
     override suspend fun sendMessageAsync(sessionId: String, request: SendMessageRequest) {
         api.sendMessageAsync(sessionId, request, directory, workspace = null)
@@ -171,12 +270,13 @@ class WorkspaceClient(
     suspend fun respondToPermission(
         sessionId: String,
         requestId: String,
-        request: PermissionResponseRequest
+        request: PermissionResponseRequest,
     ): Boolean {
         val response = api.respondToPermissionV2(sessionId, requestId, request)
-        val contentType = response.headers()["Content-Type"].orEmpty()
-        if (response.isSuccessful && !contentType.startsWith("text/html")) return true
-        if (response.code() != 404 && !contentType.startsWith("text/html")) throw HttpException(response)
+        when (response.classifyPermissionResponse()) {
+            PermissionResponseDisposition.Success -> return true
+            PermissionResponseDisposition.Fallback -> Unit
+        }
 
         return respondToPermissionLegacy(requestId, request)
     }
@@ -189,38 +289,31 @@ class WorkspaceClient(
         requestId: String,
         request: QuestionReplyRequest,
     ): Boolean {
-        try {
-            val legacy = api.respondToQuestion(requestId, request, directory, workspace = null)
-            if (legacy.isUsableQuestionResponse()) return legacy.body() == true
-            if (!legacy.isUnavailableQuestionEndpoint()) throw HttpException(legacy)
-        } catch (_: SerializationException) {
-            // Matches the bounded HTML-route endpoint-unavailable behavior used by question endpoints.
+        val legacy = api.respondToQuestion(requestId, request, directory, workspace = null)
+        when (legacy.classifyLegacyQuestionResponse()) {
+            LegacyQuestionResponseDisposition.Decode -> return legacy.decodeLegacyBoolean()
+            LegacyQuestionResponseDisposition.Fallback -> Unit
         }
 
         return api.respondToQuestionV2(sessionId, requestId, request).requireUsableV2Response()
     }
 
     suspend fun rejectQuestion(sessionId: String, requestId: String): Boolean {
-        try {
-            val legacy = api.rejectQuestion(requestId, directory, workspace = null)
-            if (legacy.isUsableQuestionResponse()) return legacy.body() == true
-            if (!legacy.isUnavailableQuestionEndpoint()) throw HttpException(legacy)
-        } catch (_: SerializationException) {
-            // Matches the bounded HTML-route endpoint-unavailable behavior used by question endpoints.
+        val legacy = api.rejectQuestion(requestId, directory, workspace = null)
+        when (legacy.classifyLegacyQuestionResponse()) {
+            LegacyQuestionResponseDisposition.Decode -> return legacy.decodeLegacyBoolean()
+            LegacyQuestionResponseDisposition.Fallback -> Unit
         }
 
         return api.rejectQuestionV2(sessionId, requestId).requireUsableV2Response()
     }
 
     override suspend fun listSessionQuestions(sessionId: String): List<QuestionRequestDto> {
-        try {
-            val legacy = api.listPendingQuestions(directory, workspace = null)
-            if (legacy.isUsableQuestionResponse()) {
-                return legacy.body().orEmpty().filter { it.sessionID == sessionId }
-            }
-            if (!legacy.isUnavailableQuestionEndpoint()) throw HttpException(legacy)
-        } catch (_: SerializationException) {
-            // Matches the bounded HTML-route endpoint-unavailable behavior used by question endpoints.
+        val legacy = api.listPendingQuestions(directory, workspace = null)
+        when (legacy.classifyLegacyQuestionResponse()) {
+            LegacyQuestionResponseDisposition.Decode ->
+                return legacy.decodeLegacyQuestions().filter { it.sessionID == sessionId }
+            LegacyQuestionResponseDisposition.Fallback -> Unit
         }
 
         val response = api.listSessionQuestionsV2(sessionId)
@@ -228,20 +321,115 @@ class WorkspaceClient(
         return response.body()?.data.orEmpty()
     }
 
-    suspend fun listPendingQuestions(): List<QuestionRequestDto> =
-        api.listPendingQuestions(directory, workspace = null).let { response ->
-            if (!response.isUsableQuestionResponse()) throw HttpException(response)
-            response.body().orEmpty()
+    suspend fun listPendingQuestions(): List<QuestionRequestDto> {
+        val response = api.listPendingQuestions(directory, workspace = null)
+        return when (response.classifyLegacyQuestionResponse()) {
+            LegacyQuestionResponseDisposition.Decode -> response.decodeLegacyQuestions()
+            LegacyQuestionResponseDisposition.Fallback -> throw HttpException(response)
         }
+    }
+
+    /** Returns null for legacy servers; v2 forms stay on this workspace's exact connection generation. */
+    suspend fun listPendingForms(sessionId: String): List<V2FormInfo>? {
+        val forms = (api as? V2WorkspaceOpenCodeApi)?.forms ?: return null
+        return forms.listSessionForms(sessionId, directory)
+    }
+
+    suspend fun getPendingForm(sessionId: String, formId: String): V2FormInfo {
+        val forms = (api as? V2WorkspaceOpenCodeApi)?.forms
+            ?: throw UnsupportedOperationException("OpenCode v2 forms are unavailable for this server")
+        return forms.getSessionForm(sessionId, formId, directory)
+    }
+
+    suspend fun replyToForm(sessionId: String, formId: String, answer: kotlinx.serialization.json.JsonObject) {
+        val forms = (api as? V2WorkspaceOpenCodeApi)?.forms
+            ?: throw UnsupportedOperationException("OpenCode v2 forms are unavailable for this server")
+        forms.reply(sessionId, formId, answer, directory)
+    }
+
+    suspend fun rejectForm(sessionId: String, formId: String) {
+        val forms = (api as? V2WorkspaceOpenCodeApi)?.forms
+            ?: throw UnsupportedOperationException("OpenCode v2 forms are unavailable for this server")
+        forms.reject(sessionId, formId, directory)
+    }
 
     private fun retrofit2.Response<*>.isUsableV2Response(): Boolean =
         isSuccessful && !headers()["Content-Type"].orEmpty().startsWith("text/html")
 
-    private fun retrofit2.Response<*>.isUsableQuestionResponse(): Boolean =
-        isSuccessful && !headers()["Content-Type"].orEmpty().startsWith("text/html")
+    private enum class PermissionResponseDisposition { Success, Fallback }
 
-    private fun retrofit2.Response<*>.isUnavailableQuestionEndpoint(): Boolean =
-        code() == 404 || headers()["Content-Type"].orEmpty().startsWith("text/html")
+    private fun retrofit2.Response<Unit>.classifyPermissionResponse(): PermissionResponseDisposition = when {
+        code() == 404 -> {
+            closePermissionResponseBodies()
+            PermissionResponseDisposition.Fallback
+        }
+        !isSuccessful -> {
+            closePermissionResponseBodies()
+            throw HttpException(this)
+        }
+        isHtmlPermissionResponse() -> {
+            closePermissionResponseBodies()
+            PermissionResponseDisposition.Fallback
+        }
+        else -> {
+            closePermissionResponseBodies()
+            PermissionResponseDisposition.Success
+        }
+    }
+
+    private fun retrofit2.Response<Unit>.isHtmlPermissionResponse(): Boolean =
+        headers()["Content-Type"].isHtmlContentType() ||
+            raw().body.contentType()?.toString().isHtmlContentType()
+
+    private fun retrofit2.Response<Unit>.closePermissionResponseBodies() {
+        // Retrofit's Unit converter closes the original successful response body before returning.
+        // raw().body is a metadata-only NoContentResponseBody whose close() attempts to read its
+        // unavailable source and throws. Only the buffered error body remains ours to close.
+        errorBody()?.close()
+    }
+
+    private enum class LegacyQuestionResponseDisposition { Decode, Fallback }
+
+    private fun retrofit2.Response<ResponseBody>.classifyLegacyQuestionResponse(): LegacyQuestionResponseDisposition =
+        when {
+            code() == 404 -> {
+                closeLegacyQuestionBodies()
+                LegacyQuestionResponseDisposition.Fallback
+            }
+            !isSuccessful -> {
+                closeLegacyQuestionBodies()
+                throw HttpException(this)
+            }
+            isSuccessfulHtmlQuestionResponse() -> {
+                closeLegacyQuestionBodies()
+                LegacyQuestionResponseDisposition.Fallback
+            }
+            else -> LegacyQuestionResponseDisposition.Decode
+        }
+
+    private fun retrofit2.Response<ResponseBody>.isSuccessfulHtmlQuestionResponse(): Boolean =
+        isSuccessful && (
+            headers()["Content-Type"].isHtmlContentType() ||
+                body()?.contentType()?.toString().isHtmlContentType()
+            )
+
+    private fun String?.isHtmlContentType(): Boolean =
+        this?.substringBefore(';')?.trim()?.equals("text/html", ignoreCase = true) == true
+
+    private fun retrofit2.Response<ResponseBody>.closeLegacyQuestionBodies() {
+        body()?.close()
+        errorBody()?.close()
+    }
+
+    private fun retrofit2.Response<ResponseBody>.decodeLegacyBoolean(): Boolean {
+        val content = body()?.string() ?: return false
+        return json.decodeFromString<Boolean?>(content) == true
+    }
+
+    private fun retrofit2.Response<ResponseBody>.decodeLegacyQuestions(): List<QuestionRequestDto> {
+        val content = body()?.string() ?: return emptyList()
+        return json.decodeFromString<List<QuestionRequestDto>?>(content).orEmpty()
+    }
 
     private fun retrofit2.Response<Unit>.requireUsableV2Response(): Boolean {
         if (!isUsableV2Response()) throw HttpException(this)
@@ -250,17 +438,146 @@ class WorkspaceClient(
 
     suspend fun listCommands(): List<CommandDto> = api.listCommands(directory, workspace = null)
 
-    suspend fun executeCommand(sessionId: String, request: ExecuteCommandRequest): MessageWrapperDto =
-        api.executeCommand(sessionId, request, directory, workspace = null)
+    suspend fun executeCommand(sessionId: String, request: ExecuteCommandRequest) {
+        val currentApi = api
+        if (currentApi is V2WorkspaceOpenCodeApi) {
+            currentApi.dispatchCommand(sessionId, request)
+        } else {
+            currentApi.executeCommand(sessionId, request, directory, workspace = null)
+        }
+    }
 
     suspend fun executeShellCommand(sessionId: String, request: ShellCommandRequest): MessageWrapperDto =
         api.executeShellCommand(sessionId, request, directory, workspace = null)
+    suspend fun executeOfishShellOutput(sessionId: String, request: ShellCommandRequest, marker: String): String? {
+        val currentApi = api
+        if (currentApi is V2WorkspaceOpenCodeApi) {
+            val output = currentApi.executeShellForOutput(sessionId, request.command)
+            return output.takeIf { text -> text.lineSequence().any { it == marker } }
+        }
+        return dev.blazelight.p4oc.data.files.ofish.OfishShellOutputExtractor.extractMutationSegment(
+            currentApi.executeShellCommand(sessionId, request, directory, workspace = null),
+            marker,
+        )
+    }
 
     suspend fun listFiles(path: String): List<FileNodeDto> = api.listFiles(path, directory, workspace = null)
 
     suspend fun readFile(path: String): FileContentDto = api.readFile(path, directory, workspace = null)
 
+    suspend fun readFileBounded(path: String, maxResponseBytes: Long): FileContentDto {
+        require(maxResponseBytes > 0) { "maxResponseBytes must be positive" }
+        val currentApi = api
+        val response = currentApi.readFileRaw(path, directory, workspace = null)
+        if (currentApi !is V2WorkspaceOpenCodeApi) {
+            return response.decodeBoundedJson(maxResponseBytes, FILE_RESPONSE_TOO_LARGE_MESSAGE) { content ->
+                json.decodeFromString(content)
+            }
+        }
+        try {
+            if (!response.isSuccessful) throw HttpException(response)
+            val body = response.body() ?: throw kotlinx.serialization.SerializationException("Missing file body")
+            val mime = body.contentType()?.toString()
+            val bytes = body.readBytesBoundedCancellable(maxResponseBytes, FILE_RESPONSE_TOO_LARGE_MESSAGE)
+            val isText = mime?.startsWith("text/") == true || mime == "application/json" ||
+                mime == "application/xml" || mime == "application/javascript"
+            return if (isText) {
+                FileContentDto(type = "text", content = decodeStrictUtf8(bytes), mimeType = mime)
+            } else {
+                FileContentDto(
+                    type = "binary",
+                    content = bytes.toByteString().base64(),
+                    encoding = "base64",
+                    mimeType = mime,
+                )
+            }
+        } finally {
+            response.body()?.close()
+            response.errorBody()?.close()
+        }
+    }
+
+    private suspend fun <T> retrofit2.Response<ResponseBody>.decodeBoundedJson(
+        maxResponseBytes: Long,
+        tooLargeMessage: String,
+        decode: (String) -> T,
+    ): T = try {
+        if (!isSuccessful) throw HttpException(this)
+        val responseBody = body() ?: throw kotlinx.serialization.SerializationException("Missing response body")
+        decode(responseBody.readUtf8BoundedCancellable(maxResponseBytes, tooLargeMessage))
+    } finally {
+        body()?.close()
+        errorBody()?.close()
+    }
+
+    private suspend fun ResponseBody.readUtf8BoundedCancellable(
+        maxResponseBytes: Long,
+        tooLargeMessage: String,
+    ): String =
+        withContext(Dispatchers.IO) {
+            suspendCancellableCoroutine { continuation ->
+                continuation.invokeOnCancellation { close() }
+                continuation.resumeWith(
+                    runCatching { readUtf8Bounded(maxResponseBytes, tooLargeMessage) },
+                )
+            }
+        }
+
+    private suspend fun ResponseBody.readBytesBoundedCancellable(
+        maxResponseBytes: Long,
+        tooLargeMessage: String,
+    ): ByteArray = withContext(Dispatchers.IO) {
+        suspendCancellableCoroutine { continuation ->
+            continuation.invokeOnCancellation { close() }
+            continuation.resumeWith(runCatching { readBytesBounded(maxResponseBytes, tooLargeMessage) })
+        }
+    }
+
+    private fun ResponseBody.readUtf8Bounded(maxResponseBytes: Long, tooLargeMessage: String): String =
+        decodeStrictUtf8(readBytesBounded(maxResponseBytes, tooLargeMessage))
+
+    private fun ResponseBody.readBytesBounded(maxResponseBytes: Long, tooLargeMessage: String): ByteArray {
+        val declaredBytes = contentLength()
+        if (declaredBytes > maxResponseBytes) throw BoundedResponseTooLargeException(tooLargeMessage)
+
+        val bufferedBytes = Buffer()
+        val responseSource = source()
+        var streamedBytes = 0L
+        while (true) {
+            val remainingBytes = maxResponseBytes - streamedBytes
+            val readLimit = if (remainingBytes >= BOUNDED_FILE_READ_CHUNK_BYTES) {
+                BOUNDED_FILE_READ_CHUNK_BYTES
+            } else {
+                remainingBytes + 1L
+            }
+            val readBytes = responseSource.read(bufferedBytes, readLimit)
+            if (readBytes == -1L) break
+            if (readBytes > remainingBytes) throw BoundedResponseTooLargeException(tooLargeMessage)
+            streamedBytes += readBytes
+        }
+        return bufferedBytes.readByteArray()
+    }
+
+    private fun decodeStrictUtf8(bytes: ByteArray): String = try {
+        StandardCharsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(ByteBuffer.wrap(bytes))
+            .toString()
+    } catch (_: CharacterCodingException) {
+        throw kotlinx.serialization.SerializationException(INVALID_UTF8_RESPONSE_MESSAGE)
+    }
+
     suspend fun getFileStatus(): List<FileStatusDto> = api.getFileStatus(directory, workspace = null)
+
+    suspend fun searchFiles(query: String): List<String> = api.searchFiles(
+        query = query,
+        directory = workspace.directory,
+        workspace = null,
+        dirs = "false",
+        type = "file",
+        limit = 200,
+    )
 
     suspend fun searchSymbols(query: String): List<SymbolDto> = api.searchSymbols(query, directory, workspace = null)
 }

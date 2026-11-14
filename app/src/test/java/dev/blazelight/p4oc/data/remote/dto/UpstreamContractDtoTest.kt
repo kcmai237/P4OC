@@ -1,12 +1,79 @@
 package dev.blazelight.p4oc.data.remote.dto
 
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class UpstreamContractDtoTest {
     private val json = Json { ignoreUnknownKeys = true }
+
+    @Test
+    fun `message decoding discards multi-megabyte object summary`() {
+        val patchMarker = "summary-patch-must-not-be-retained"
+        val patch = patchMarker + "x".repeat(3 * 1024 * 1024)
+        val payload =
+            """
+            {
+              "info": {
+                "id": "msg-user",
+                "sessionID": "ses-1",
+                "time": { "created": 1 },
+                "role": "user",
+                "summary": {
+                  "title": "large diff",
+                  "diffs": [
+                    {
+                      "file": "src/Main.kt",
+                      "patch": "$patch",
+                      "additions": 1,
+                      "deletions": 0
+                    }
+                  ]
+                }
+              },
+              "parts": []
+            }
+            """.trimIndent()
+
+        val message = json.decodeFromString<MessageWrapperDto>(payload)
+        val encoded = json.encodeToString(message)
+
+        assertEquals("user", message.info.role)
+        assertFalse(encoded.contains(patchMarker))
+        assertFalse(encoded.contains("\"summary\""))
+        assertTrue(encoded.length < payload.length / 100)
+    }
+
+    @Test
+    fun `assistant message decoding ignores boolean summary`() {
+        val payload =
+            """
+            {
+              "info": {
+                "id": "msg-assistant",
+                "sessionID": "ses-1",
+                "time": { "created": 2, "completed": 3 },
+                "role": "assistant",
+                "parentID": "msg-user",
+                "modelID": "model-1",
+                "providerID": "provider-1",
+                "agent": "build",
+                "summary": true
+              },
+              "parts": []
+            }
+            """.trimIndent()
+
+        val message = json.decodeFromString<MessageWrapperDto>(payload)
+        val encoded = json.encodeToString(message)
+
+        assertEquals("assistant", message.info.role)
+        assertFalse(encoded.contains("\"summary\""))
+    }
 
     @Test
     fun `mcp add response decodes status map`() {
@@ -102,7 +169,54 @@ class UpstreamContractDtoTest {
         assertEquals("brisk-fox", session.slug)
         assertEquals("wrk_1", session.workspaceID)
         assertEquals("model-1", session.model?.id)
-        assertEquals(4, session.tokens?.input)
+        assertEquals(4L, session.tokens?.input)
+    }
+
+    @Test
+    fun `session list decoding retains 64-bit token accounting`() {
+        val sessions = json.decodeFromString<List<SessionDto>>(
+            """
+            [
+              {
+                "id":"ses_0","projectID":"project-1","directory":"/repo","title":"Zero",
+                "version":"1.18.3","tokens":{},"time":{"created":1}
+              },
+              {
+                "id":"ses_1","projectID":"project-1","directory":"/repo","title":"Int max",
+                "version":"1.18.3","tokens":{"input":2147483647},"time":{"created":2}
+              },
+              {
+                "id":"ses_2","projectID":"project-1","directory":"/repo","title":"Two",
+                "version":"1.18.3","time":{"created":3}
+              },
+              {
+                "id":"ses_3","projectID":"project-1","directory":"/repo","title":"Three",
+                "version":"1.18.3","time":{"created":4}
+              },
+              {
+                "id":"ses_4","projectID":"project-1","directory":"/repo","title":"Reported crash",
+                "version":"1.18.3",
+                "tokens":{
+                  "cache":{"read":2371688120,"write":2147483651},
+                  "input":2147483648,
+                  "output":2147483649,
+                  "reasoning":2147483650
+                },
+                "time":{"created":5}
+              }
+            ]
+            """.trimIndent()
+        )
+
+        assertEquals(0L, sessions[0].tokens?.input)
+        assertEquals(0L, sessions[0].tokens?.cache?.read ?: 0L)
+        assertEquals(Int.MAX_VALUE.toLong(), sessions[1].tokens?.input)
+        val reported = sessions[4].tokens!!
+        assertEquals(2_147_483_648L, reported.input)
+        assertEquals(2_147_483_649L, reported.output)
+        assertEquals(2_147_483_650L, reported.reasoning)
+        assertEquals(2_371_688_120L, reported.cache?.read)
+        assertEquals(2_147_483_651L, reported.cache?.write)
     }
 
     @Test

@@ -21,6 +21,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.ConnectionPool
 import okhttp3.Credentials
 import okhttp3.Dispatcher
@@ -38,6 +40,7 @@ class ConnectionManager constructor(
     private val json: Json,
     private val eventMapper: EventMapper,
     private val settingsDataStore: SettingsDataStore,
+    private val generationIssuer: () -> ServerGeneration,
 ) {
     companion object {
         private const val TAG = "ConnectionManager"
@@ -48,7 +51,6 @@ class ConnectionManager constructor(
     private val connectionLifecycleLock = Any()
     private var sseForwardingJob: Job? = null
     private var sseEscalationJob: Job? = null
-    private var generationCounter: Long = 0L
     private val sharedConnectionPool = ConnectionPool(
         maxIdleConnections = 10,
         keepAliveDuration = 5,
@@ -98,16 +100,6 @@ class ConnectionManager constructor(
     suspend fun connect(config: ServerConfig, password: String? = null): Result<List<ProjectDto>> {
         AppLog.d(TAG, "Connecting")
 
-        if (config.username != null && password != null &&
-            !ServerUrl.allowsCleartextCredentials(config.url)
-        ) {
-            return Result.failure(
-                IllegalArgumentException(
-                    "Credentials cannot be sent over HTTP outside a private local network",
-                ),
-            )
-        }
-
         disconnect()
         _connectionState.value = ConnectionState.Connecting
 
@@ -130,60 +122,13 @@ class ConnectionManager constructor(
         return try {
             val baseClient = buildBaseOkHttpClient(config, password)
             val okHttpClient = buildOkHttpClient(baseClient)
-            val retrofit = buildRetrofit(config.url, okHttpClient)
-            val api = retrofit.create(OpenCodeApi::class.java)
-
-            val probeResult = runCatching {
-                withTimeout(8_000) {
-                    api.listProjects(directory = null, workspace = null)
-                }
+            val (api, isV2) = createApiForConnection(config.url, okHttpClient)
+            val projects = probeProjects(api)
+            if (projects.isFailure) {
+                return Result.failure(projects.exceptionOrNull() ?: Exception("Connection failed"))
             }
-
-            if (probeResult.isFailure) {
-                currentCoroutineContext().ensureActive()
-                val error = probeResult.exceptionOrNull()
-                AppLog.e(TAG, "Project probe failed")
-                _connectionState.value = ConnectionState.Error("Connection failed")
-                return Result.failure(error ?: Exception("Connection failed"))
-            }
-
-            AppLog.d(TAG, "Project probe passed, starting SSE")
-
-            val sseClient = buildSseOkHttpClient(baseClient)
-            val eventSource = OpenCodeEventSource(
-                okHttpClient = sseClient,
-                json = json,
-                baseUrl = config.url,
-                eventMapper = eventMapper,
-            )
-
-            // Build and store the auth-aware WebSocket client (shares pool with base)
-            _authOkHttpClient.value = buildWebSocketOkHttpClient(baseClient)
-
-            val generation = ServerGeneration(++generationCounter)
-            val connection = Connection(config, generation, api, eventSource)
-            synchronized(connectionLifecycleLock) {
-                _connection.value = connection
-            }
-
-            // Forward SSE connection state instead of setting Connected optimistically.
-            // The state will move from Connecting → Connected when SSE onOpen fires.
-            sseForwardingJob?.cancel()
-            sseForwardingJob = scope.launch {
-                eventSource.connectionState.collect { sseState ->
-                    // Only forward if this event source is still the active one
-                    if (_connection.value?.eventSource === eventSource) {
-                        AppLog.d(TAG, "SSE connection state updated")
-                        _connectionState.value = sseState
-                        handleSseStateForReconnectOwner(connection, sseState)
-                    }
-                }
-            }
-
-            eventSource.connect()
-
-            AppLog.d(TAG, "Connected successfully")
-            Result.success(probeResult.getOrNull().orEmpty())
+            startConnection(config, baseClient, api, isV2)
+            Result.success(projects.getOrNull().orEmpty())
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -193,6 +138,84 @@ class ConnectionManager constructor(
             _authOkHttpClient.value = null
             Result.failure(e)
         }
+    }
+
+    private suspend fun createApiForConnection(
+        baseUrl: String,
+        client: OkHttpClient,
+    ): Pair<OpenCodeApi, Boolean> {
+        val legacyApi = buildRetrofit(baseUrl, client).create(OpenCodeApi::class.java)
+        val v2Http = V2Http(baseUrl, client, json)
+        val isV2 = runCatching {
+            withTimeout(8_000) {
+                v2Http.request("GET", "api/info").jsonObject["version"]
+                    ?.jsonPrimitive?.content?.startsWith("2.") == true
+            }
+        }.getOrElse {
+            currentCoroutineContext().ensureActive()
+            false
+        }
+        val api = if (isV2) {
+            V2WorkspaceOpenCodeApi(
+                V2SessionOpenCodeApi(unsupportedV2Api(), v2Http, json),
+                v2Http,
+                json,
+            )
+        } else {
+            legacyApi
+        }
+        return api to isV2
+    }
+
+    private suspend fun probeProjects(api: OpenCodeApi): Result<List<ProjectDto>> {
+        val result = runCatching {
+            withTimeout(8_000) {
+                api.listProjects(directory = null, workspace = null)
+            }
+        }
+        if (result.isFailure) {
+            currentCoroutineContext().ensureActive()
+            AppLog.e(TAG, "Project probe failed")
+            _connectionState.value = ConnectionState.Error("Connection failed")
+        }
+        return result
+    }
+
+    private fun startConnection(
+        config: ServerConfig,
+        baseClient: OkHttpClient,
+        api: OpenCodeApi,
+        isV2: Boolean,
+    ) {
+        AppLog.d(TAG, "Project probe passed, starting SSE")
+        val eventSource = OpenCodeEventSource(
+            okHttpClient = buildSseOkHttpClient(baseClient),
+            json = json,
+            baseUrl = config.url,
+            eventMapper = eventMapper,
+            useV2 = isV2,
+            backoffEnabled = true,
+        )
+        _authOkHttpClient.value = buildWebSocketOkHttpClient(baseClient)
+
+        val connection = Connection(config, generationIssuer(), api, eventSource)
+        synchronized(connectionLifecycleLock) {
+            _connection.value = connection
+        }
+
+        sseForwardingJob?.cancel()
+        sseForwardingJob = scope.launch {
+            eventSource.connectionState.collect { sseState ->
+                if (_connection.value?.eventSource === eventSource) {
+                    AppLog.d(TAG, "SSE connection state updated")
+                    _connectionState.value = sseState
+                    handleSseStateForReconnectOwner(connection, sseState)
+                }
+            }
+        }
+
+        eventSource.connect()
+        AppLog.d(TAG, "Connected successfully")
     }
 
     internal fun connectionCandidates(config: ServerConfig): List<ServerConfig> {
@@ -274,7 +297,8 @@ class ConnectionManager constructor(
         sseEscalationJob?.cancel()
         sseEscalationJob = null
         _connection.value?.disconnect()
-        sharedConnectionPool.evictAll()
+        // Closing pooled TLS sockets writes close_notify; disconnect may run on the main thread.
+        scope.launch(Dispatchers.IO) { sharedConnectionPool.evictAll() }
         _connection.value = null
         _authOkHttpClient.value = null
         _connectionState.value = ConnectionState.Disconnected
@@ -340,6 +364,11 @@ class ConnectionManager constructor(
             builder.applyInsecureTls()
         }
 
+        if (BuildConfig.DEBUG) {
+            builder.eventListener(DebugNetworkMetrics.eventListener())
+            builder.addNetworkInterceptor(DebugNetworkMetrics.networkInterceptor())
+        }
+
         return builder.build()
     }
 
@@ -349,9 +378,9 @@ class ConnectionManager constructor(
             .addInterceptor(createDiagnosticLoggingInterceptor())
             .build()
 
-    private fun buildSseOkHttpClient(base: OkHttpClient): OkHttpClient =
+    internal fun buildSseOkHttpClient(base: OkHttpClient): OkHttpClient =
         base.newBuilder()
-            .readTimeout(0, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
             .addInterceptor(createDiagnosticLoggingInterceptor())
             .build()
 

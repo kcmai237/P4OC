@@ -11,11 +11,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
@@ -59,8 +57,8 @@ class PtyWebSocketClient constructor(
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
-    private val _output = MutableSharedFlow<String>(extraBufferCapacity = 1000)
-    val output: SharedFlow<String> = _output.asSharedFlow()
+    private val outputBuffer = PtyOutputBuffer()
+    val output: Flow<String> = outputBuffer.frames
 
     private var currentWebSocket: WebSocket? = null
     private var currentPtyId: String? = null
@@ -274,12 +272,9 @@ class PtyWebSocketClient constructor(
                 override fun onMessage(webSocket: WebSocket, text: String) {
                     if (generation != gen) return
                     AppLog.v(TAG, "Received terminal output (${text.length} chars)")
-                    // This is a bounded handoff to the terminal collector, not upstream
-                    // backpressure to OkHttp. If rendering falls behind far enough to
-                    // fill the buffer, drop the frame rather than spawning unbounded work.
-                    if (!_output.tryEmit(text)) {
-                        AppLog.w(TAG, "Dropped PTY output frame because terminal output buffer is full")
-                    }
+                    // Bounded handoff with real backpressure: block the reader thread until the
+                    // terminal collector has room instead of dropping the frame (F15).
+                    outputBuffer.emitBlocking(text)
                 }
 
                 override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
@@ -404,6 +399,7 @@ class PtyWebSocketClient constructor(
      * Cleanup resources. Called when the singleton is being destroyed.
      */
     override fun close() {
+        outputBuffer.close()
         disconnect()
         supervisorJob.cancel()
     }

@@ -115,6 +115,7 @@ class SettingsViewModelRegistryTest {
 
     private fun settingsDataStore(): SettingsDataStore = mockk(relaxUnitFun = true) {
         every { connectionSettings } returns flowOf(ConnectionSettings())
+        every { dataSaverEnabled } returns flowOf(false)
         every { serverUrl } returns flowOf("http://localhost:4096")
         every { isLocalServer } returns flowOf(true)
         every { themeMode } returns flowOf("system")

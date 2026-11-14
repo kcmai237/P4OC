@@ -8,6 +8,9 @@ import dev.blazelight.p4oc.data.remote.dto.MessageWrapperDto
 import dev.blazelight.p4oc.data.remote.mapper.MessageMapper
 import dev.blazelight.p4oc.data.server.ActiveServerApiProvider
 import dev.blazelight.p4oc.data.workspace.WorkspaceClient
+import dev.blazelight.p4oc.domain.model.Message
+import dev.blazelight.p4oc.domain.model.OpenCodeEvent
+import dev.blazelight.p4oc.domain.model.TokenUsage
 import dev.blazelight.p4oc.domain.server.ServerGeneration
 import dev.blazelight.p4oc.domain.server.ServerRef
 import dev.blazelight.p4oc.domain.session.SessionId
@@ -111,6 +114,36 @@ class MessageWindowPagingTest {
         offLease.close()
     }
 
+    @Test
+    fun `paging survives reconnect and live prompt without gaps or duplicates`() = runTest {
+        val (repo, api) = repository(testScheduler, incremental = true)
+        coEvery { api.getMessages(any(), any(), any(), any(), any()) } coAnswers {
+            page(secondArg<Int?>(), thirdArg<String?>())
+        }
+        val lease = repo.acquireSession(sessionId)
+
+        repo.loadMessages(sessionId, 100)
+        repo.loadMessages(sessionId, 200)
+        repo.loadMessages(sessionId, 300)
+        repo.loadMessages(sessionId, 400)
+        advanceUntilIdle()
+
+        // A live prompt response lands via SSE after the bounded history was loaded.
+        repo.acceptEvent(OpenCodeEvent.MessageUpdated(assistantMessage("m351", createdAt = 351L)))
+        advanceUntilIdle()
+
+        // Reconnect recovery re-fetches the remembered full window non-destructively.
+        repo.acceptEvent(OpenCodeEvent.Connected)
+        advanceUntilIdle()
+
+        val ids = repo.messages(sessionId).value.map { it.message.id }
+        assertEquals((1L..351L).map { "m$it" }, ids)
+        assertEquals(ids.size, ids.toSet().size)
+        // The prompt response must survive the recovery, which refetches exactly the loaded window.
+        coVerify(exactly = 1) { api.getMessages("s1", 400, null, "/test", null) }
+        lease.close()
+    }
+
     private fun page(limit: Int?, before: String?): List<MessageWrapperDto> {
         val size = limit ?: history.size
         if (before == null) return history.takeLast(size)
@@ -160,5 +193,18 @@ class MessageWindowPagingTest {
             mode = "chat",
         ),
         parts = emptyList(),
+    )
+
+    private fun assistantMessage(id: String, createdAt: Long): Message.Assistant = Message.Assistant(
+        id = id,
+        sessionID = "s1",
+        createdAt = createdAt,
+        parentID = "",
+        providerID = "provider",
+        modelID = "model",
+        mode = "chat",
+        agent = "assistant",
+        cost = 0.0,
+        tokens = TokenUsage(input = 0, output = 0),
     )
 }

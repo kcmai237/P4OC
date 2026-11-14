@@ -230,7 +230,7 @@ class SettingsDataStore constructor(
 
         /** Pure preference mapping, kept testable without an Android DataStore instance. */
         internal fun readDataSaverEnabled(prefs: Preferences): Boolean =
-            prefs[KEY_DATA_SAVER_ENABLED] ?: false
+            prefs[KEY_DATA_SAVER_ENABLED] ?: true
 
         const val DEFAULT_LOCAL_URL = "http://localhost:4096"
         const val THEME_SYSTEM = "system"
@@ -782,7 +782,7 @@ class SettingsDataStore constructor(
         }
     }
 
-    // ── O11 data saver (opt-in, OFF by default) ──
+    // ── Data saver (ON by default, opt-out) ──
 
     val dataSaverEnabled: Flow<Boolean> = context.dataStore.data
         .map { prefs -> readDataSaverEnabled(prefs) }

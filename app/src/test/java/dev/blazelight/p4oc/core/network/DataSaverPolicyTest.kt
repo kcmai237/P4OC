@@ -7,15 +7,13 @@ import org.junit.Test
 class DataSaverPolicyTest {
 
     @Test
-    fun `data saver is off by default`() {
+    fun `inert policy stays off`() {
         assertFalse(DataSaverPolicy.Disabled.active.value)
     }
 
     @Test
-    fun `data saver only engages when opt in and metered`() {
-        assertFalse("OFF network metered", isDataSaverActive(optIn = false, metered = false))
-        assertFalse("OFF network metered", isDataSaverActive(optIn = false, metered = true))
-        assertFalse("ON but Wi-Fi (unmetered) must be unchanged", isDataSaverActive(optIn = true, metered = false))
-        assertTrue("ON on a metered network", isDataSaverActive(optIn = true, metered = true))
+    fun `data saver engages on every network when opted in`() {
+        assertFalse(isDataSaverActive(optIn = false))
+        assertTrue(isDataSaverActive(optIn = true))
     }
 }

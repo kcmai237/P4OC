@@ -18,6 +18,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.blazelight.p4oc.R
+import dev.blazelight.p4oc.core.network.DataUsageSnapshot
 import dev.blazelight.p4oc.ui.components.TuiStepper
 import dev.blazelight.p4oc.ui.components.TuiSwitch
 import dev.blazelight.p4oc.ui.components.TuiTopBar
@@ -25,6 +26,7 @@ import dev.blazelight.p4oc.ui.theme.LocalOpenCodeTheme
 import dev.blazelight.p4oc.ui.theme.Sizing
 import dev.blazelight.p4oc.ui.theme.Spacing
 import org.koin.androidx.compose.koinViewModel
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -34,6 +36,7 @@ fun ConnectionSettingsScreen(
 ) {
     val connectionSettings by viewModel.connectionSettings.collectAsStateWithLifecycle()
     val dataSaverEnabled by viewModel.dataSaverEnabled.collectAsStateWithLifecycle()
+    val dataUsage by viewModel.dataUsage.collectAsStateWithLifecycle()
     val theme = LocalOpenCodeTheme.current
 
     Scaffold(
@@ -109,8 +112,86 @@ fun ConnectionSettingsScreen(
                 enabled = true,
                 testTag = "settings_data_saver"
             )
+
+            SectionHeader(title = stringResource(R.string.settings_data_usage_section))
+            DataUsageCard(usage = dataUsage, onReset = viewModel::resetDataUsage)
         }
     }
+}
+
+@Composable
+private fun DataUsageCard(usage: DataUsageSnapshot, onReset: () -> Unit) {
+    val theme = LocalOpenCodeTheme.current
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Spacing.lg, vertical = Spacing.mdLg)
+            .testTag("settings_data_usage"),
+        verticalArrangement = Arrangement.spacedBy(Spacing.xs)
+    ) {
+        Text(
+            text = stringResource(R.string.settings_data_usage_today, formatBytes(usage.totalBytes)),
+            style = MaterialTheme.typography.bodyMedium,
+            color = theme.text
+        )
+        Text(
+            text = stringResource(
+                R.string.settings_data_usage_detail,
+                formatBytes(usage.responseBytes),
+                formatBytes(usage.requestBytes),
+                usage.calls
+            ),
+            style = MaterialTheme.typography.bodySmall,
+            color = theme.textMuted
+        )
+        Text(
+            text = stringResource(
+                R.string.settings_data_usage_encoding,
+                usage.encodings.entries
+                    .sortedByDescending { it.value }
+                    .joinToString(", ") { "${it.key} ×${it.value}" }
+                    .ifEmpty { "—" }
+            ),
+            style = MaterialTheme.typography.bodySmall,
+            color = theme.textMuted
+        )
+        if (usage.endpoints.isNotEmpty()) {
+            Text(
+                text = stringResource(R.string.settings_data_usage_endpoints),
+                style = MaterialTheme.typography.bodySmall,
+                color = theme.textMuted
+            )
+            usage.endpoints.take(3).forEach { endpoint ->
+                Text(
+                    text = "${endpoint.label} — ${formatBytes(endpoint.requestBytes + endpoint.responseBytes)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = theme.text,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+        TextButton(
+            onClick = onReset,
+            modifier = Modifier.testTag("settings_data_usage_reset")
+        ) {
+            Text(stringResource(R.string.settings_data_usage_reset))
+        }
+    }
+    HorizontalDivider(
+        thickness = Sizing.dividerThickness,
+        color = theme.borderSubtle
+    )
+}
+
+private fun formatBytes(bytes: Long): String = when {
+    bytes >= 1024L * 1024L * 1024L ->
+        String.format(Locale.US, "%.2f GiB", bytes / (1024.0 * 1024.0 * 1024.0))
+    bytes >= 1024L * 1024L ->
+        String.format(Locale.US, "%.2f MiB", bytes / (1024.0 * 1024.0))
+    bytes >= 1024L ->
+        String.format(Locale.US, "%.1f KiB", bytes / 1024.0)
+    else -> "$bytes B"
 }
 
 @Composable

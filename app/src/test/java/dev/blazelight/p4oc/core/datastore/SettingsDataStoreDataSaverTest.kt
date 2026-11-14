@@ -9,8 +9,8 @@ import org.junit.Test
 class SettingsDataStoreDataSaverTest {
 
     @Test
-    fun `data saver preference defaults to false`() {
-        assertFalse(SettingsDataStore.readDataSaverEnabled(mutablePreferencesOf()))
+    fun `data saver preference defaults to true`() {
+        assertTrue(SettingsDataStore.readDataSaverEnabled(mutablePreferencesOf()))
     }
 
     @Test

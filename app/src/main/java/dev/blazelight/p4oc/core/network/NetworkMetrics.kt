@@ -1,9 +1,11 @@
 package dev.blazelight.p4oc.core.network
 
+import dev.blazelight.p4oc.BuildConfig
 import dev.blazelight.p4oc.core.log.AppLog
 import okhttp3.Call
 import okhttp3.EventListener
 import okhttp3.Interceptor
+import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.asResponseBody
 import okio.Buffer
@@ -14,14 +16,11 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Debug-only network accounting. Installed by [ConnectionManager] only when
- * `BuildConfig.DEBUG` is true and stripped from release builds by R8.
- *
- * Request bytes are reported by OkHttp's [EventListener.requestBodyEnd]; response bytes are
- * counted at the network layer so compressed bodies are measured on the wire. WebSocket frames
- * are not counted (OkHttp exposes no HTTP body for them).
+ * Always-on network accounting. Response bytes are counted at the network layer so compressed
+ * bodies are measured on the wire; SSE is counted as it streams. WebSocket frames are not counted
+ * by OkHttp and are therefore absent from the totals.
  */
-internal object DebugNetworkMetrics {
+internal object NetworkMetrics {
 
     private const val TAG = "NetMetrics"
     private const val LOG_EVERY_CALLS = 20L
@@ -42,6 +41,7 @@ internal object DebugNetworkMetrics {
         val responseBytes = AtomicLong()
         @Volatile var encoding: String? = null
         @Volatile var protocol: String? = null
+        @Volatile var endpoint: String = ""
     }
 
     private val states = ConcurrentHashMap<Call, CallState>()
@@ -50,15 +50,17 @@ internal object DebugNetworkMetrics {
     private val liveResponseBytes = AtomicLong()
     private val completedCalls = AtomicLong()
 
-    fun eventListener(): EventListener = object : EventListener() {
+    fun eventListener(sink: NetworkUsageSink = NetworkUsageSink.None): EventListener = object : EventListener() {
         override fun callStart(call: Call) {
-            states[call] = CallState()
+            states[call] = CallState().also { it.endpoint = endpointLabel(call.request()) }
         }
 
         override fun requestBodyEnd(call: Call, byteCount: Long) {
             if (byteCount <= 0) return
-            states[call]?.requestBytes?.addAndGet(byteCount)
+            val state = states[call] ?: return
+            state.requestBytes.addAndGet(byteCount)
             liveRequestBytes.addAndGet(byteCount)
+            sink.onRequestBytes(state.endpoint, byteCount)
         }
 
         override fun responseHeadersEnd(call: Call, response: Response) {
@@ -68,28 +70,30 @@ internal object DebugNetworkMetrics {
         }
 
         override fun callEnd(call: Call) {
-            finish(call)
+            finish(call, sink)
         }
 
         override fun callFailed(call: Call, ioe: IOException) {
-            finish(call)
+            finish(call, sink)
         }
     }
 
-    fun networkInterceptor(): Interceptor = Interceptor { chain ->
+    fun networkInterceptor(sink: NetworkUsageSink = NetworkUsageSink.None): Interceptor = Interceptor { chain ->
         val call = chain.call()
-        val state = states.computeIfAbsent(call) { CallState() }
-        val response = chain.proceed(chain.request())
+        val request = chain.request()
+        val endpoint = endpointLabel(request)
+        val response = chain.proceed(request)
         val body = response.body
         val counting = object : ForwardingSource(body.source()) {
-            override fun read(sink: Buffer, byteCount: Long): Long {
-                val read = super.read(sink, byteCount)
+            override fun read(sinkBuffer: Buffer, byteCount: Long): Long {
+                val read = super.read(sinkBuffer, byteCount)
                 if (read > 0) {
-                    val before = state.responseBytes.get()
+                    states[call]?.responseBytes?.addAndGet(read)
+                    val before = liveResponseBytes.get()
                     val after = before + read
-                    state.responseBytes.set(after)
-                    liveResponseBytes.addAndGet(read)
-                    if (after / LIVE_LOG_BYTES > before / LIVE_LOG_BYTES) {
+                    liveResponseBytes.set(after)
+                    sink.onResponseBytes(endpoint, read)
+                    if (BuildConfig.DEBUG && after / LIVE_LOG_BYTES > before / LIVE_LOG_BYTES) {
                         AppLog.i(TAG) { summary() }
                     }
                 }
@@ -101,7 +105,7 @@ internal object DebugNetworkMetrics {
             .build()
     }
 
-    private fun finish(call: Call) {
+    private fun finish(call: Call, sink: NetworkUsageSink) {
         val state = states.remove(call) ?: return
         val request = call.request()
         record(
@@ -113,7 +117,9 @@ internal object DebugNetworkMetrics {
             encoding = state.encoding,
             protocol = state.protocol,
         )
-        if (completedCalls.incrementAndGet() % LOG_EVERY_CALLS == 0L) {
+        sink.onCallCompleted(state.endpoint, state.encoding, state.protocol)
+        val completed = completedCalls.incrementAndGet()
+        if (BuildConfig.DEBUG && completed % LOG_EVERY_CALLS == 0L) {
             AppLog.i(TAG) { summary() }
         }
     }
@@ -181,6 +187,9 @@ internal object DebugNetworkMetrics {
         liveResponseBytes.set(0)
         completedCalls.set(0)
     }
+
+    private fun endpointLabel(request: Request): String =
+        "${request.method} ${request.url.host}${normalizePath(request.url.encodedPath)}"
 
     private fun normalizePath(path: String): String {
         if (path.isEmpty()) return "/"

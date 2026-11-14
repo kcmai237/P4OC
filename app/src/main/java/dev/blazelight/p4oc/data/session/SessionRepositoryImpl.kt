@@ -105,6 +105,9 @@ class SessionRepositoryImpl(
     @Volatile
     private var deferredForegroundRefresh: Boolean = false
 
+    @Volatile
+    private var lastNonEssentialRefreshMs: Long = 0L
+
     init {
         scope.launch {
             foregroundState.isForeground.collect { foreground ->
@@ -127,10 +130,13 @@ class SessionRepositoryImpl(
     }
 
     private fun runDeferredRefresh() {
-        // Keep the pending flag while a pause reason (background or data saver) still applies.
-        if (!isForeground || dataSaverActive) return
+        if (!isForeground) return
         if (!deferredForegroundRefresh) return
+        if (dataSaverActive && nowMs() - lastNonEssentialRefreshMs < DATA_SAVER_MIN_REFRESH_INTERVAL_MS) {
+            return
+        }
         deferredForegroundRefresh = false
+        lastNonEssentialRefreshMs = nowMs()
         scope.launch {
             runCatching { refresh() }
                 .onFailure { error ->
@@ -141,9 +147,18 @@ class SessionRepositoryImpl(
     }
 
     private fun deferNonEssentialRefresh(): Boolean {
-        if (isForeground && !dataSaverActive) return false
-        deferredForegroundRefresh = true
-        return true
+        if (!isForeground) {
+            deferredForegroundRefresh = true
+            return true
+        }
+        if (!dataSaverActive) return false
+        if (nowMs() - lastNonEssentialRefreshMs < DATA_SAVER_MIN_REFRESH_INTERVAL_MS) {
+            deferredForegroundRefresh = true
+            return true
+        }
+        deferredForegroundRefresh = false
+        lastNonEssentialRefreshMs = nowMs()
+        return false
     }
 
     @Volatile
@@ -1832,6 +1847,7 @@ class SessionRepositoryImpl(
     private companion object {
         const val FRESHNESS_MS = 30_000L
         const val PROJECT_EVENT_REFRESH_DEBOUNCE_MS = 150L
+        const val DATA_SAVER_MIN_REFRESH_INTERVAL_MS = 300_000L
         const val MAX_CONCURRENT = 10
         const val SEARCH_LIMIT = 100
         const val SESSION_INITIAL_LIMIT = 50

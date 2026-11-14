@@ -34,7 +34,7 @@ backpressure sans coalescence de trames ; O4 v2 seulement ; O15/O16/O17 refusés
 
 Non mesurable localement. Estimation auditée ≈ 17,95–20,11 Mio/j selon
 périmètre, avec **réserves** : O1 non activé, O6/O7 indisponibles. Conditions de
-mesure : appareil réel, `DebugNetworkMetrics`, ≥ 3 sessions, médiane + CV < 20 %.
+mesure : appareil réel, compteur `NetworkMetrics` visible dans l'app, ≥ 3 sessions, médiane + CV < 20 %.
 
 ## Travaux restants
 

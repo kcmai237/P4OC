@@ -70,4 +70,4 @@ saver) reste un réglage **runtime opt-in**, OFF par défaut.
   distant avant de retenter.
 - Mesurer l'APK `githubRelease` (flags ON), pas `debug`.
 - Les gains réseau restent des **estimations** tant qu'aucune mesure appareil
-  (HAR / `DebugNetworkMetrics`, ≥ 3 runs, médiane, CV < 20 %) n'est produite.
+  (HAR / compteur `NetworkMetrics`, ≥ 3 runs, médiane, CV < 20 %) n'est produite.

@@ -5,6 +5,8 @@ import androidx.lifecycle.viewModelScope
 import dev.blazelight.p4oc.core.datastore.ConnectionSettings
 import dev.blazelight.p4oc.core.datastore.SettingsDataStore
 import dev.blazelight.p4oc.core.network.ConnectionState
+import dev.blazelight.p4oc.core.network.DataUsageSnapshot
+import dev.blazelight.p4oc.core.network.DataUsageSource
 import dev.blazelight.p4oc.core.network.ServerConnectionRegistry
 import dev.blazelight.p4oc.core.network.ServerUrl
 import dev.blazelight.p4oc.ui.workspace.WorkspaceRepositoryOwner
@@ -22,6 +24,7 @@ class SettingsViewModel constructor(
     private val settingsDataStore: SettingsDataStore,
     private val serverConnectionRegistry: ServerConnectionRegistry,
     private val connectionContext: SettingsConnectionContext,
+    private val dataUsageSource: DataUsageSource = DataUsageSource.None,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SettingsUiState())
@@ -31,10 +34,12 @@ class SettingsViewModel constructor(
         settingsDataStore.connectionSettings
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), ConnectionSettings())
 
-    /** O11 opt-in data saver, OFF by default. */
+    /** Data saver, ON by default on every network. */
     val dataSaverEnabled: StateFlow<Boolean> =
         settingsDataStore.dataSaverEnabled
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+
+    val dataUsage: StateFlow<DataUsageSnapshot> = dataUsageSource.snapshot
 
     /**
      * Display name of the server these settings are scoped to, or `null` when Settings was opened
@@ -89,6 +94,10 @@ class SettingsViewModel constructor(
         viewModelScope.launch {
             settingsDataStore.setDataSaverEnabled(!dataSaverEnabled.value)
         }
+    }
+
+    fun resetDataUsage() {
+        dataUsageSource.reset()
     }
 
     suspend fun disconnect() {

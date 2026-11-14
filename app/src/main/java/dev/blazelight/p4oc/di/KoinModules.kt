@@ -6,6 +6,7 @@ import dev.blazelight.p4oc.core.haptic.HapticFeedback
 import dev.blazelight.p4oc.core.lifecycle.ForegroundState
 import dev.blazelight.p4oc.core.lifecycle.MutableForegroundState
 import dev.blazelight.p4oc.core.network.AndroidNetworkMeteredSource
+import dev.blazelight.p4oc.core.network.AndroidNetworkUsageStore
 import dev.blazelight.p4oc.core.network.ConnectionManager
 import dev.blazelight.p4oc.core.network.DataSaverPolicy
 import dev.blazelight.p4oc.core.network.MdnsDiscoveryManager
@@ -99,6 +100,7 @@ val networkModule = module {
                     eventMapper = get(),
                     settingsDataStore = get(),
                     generationIssuer = generationIssuer,
+                    networkUsage = get<AndroidNetworkUsageStore>(),
                 )
             },
         )
@@ -109,10 +111,10 @@ val networkModule = module {
     single<UserWorkspaceRootsSource> { SettingsUserWorkspaceRootsSource(get()) }
     single<ForegroundState> { MutableForegroundState() }
     single<NetworkMeteredSource> { AndroidNetworkMeteredSource(androidContext()) }
+    single { AndroidNetworkUsageStore(androidContext()) }
     single<DataSaverPolicy> {
         MutableDataSaverPolicy(
             enabled = get<SettingsDataStore>().dataSaverEnabled,
-            metered = get<NetworkMeteredSource>().metered,
             scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
         )
     }
@@ -148,6 +150,7 @@ val viewModelModule = module {
             settingsDataStore = get(),
             serverConnectionRegistry = get(),
             connectionContext = params.get<SettingsConnectionContext>(),
+            dataUsageSource = get<AndroidNetworkUsageStore>(),
         )
     }
     viewModelOf(::NotificationSettingsViewModel)

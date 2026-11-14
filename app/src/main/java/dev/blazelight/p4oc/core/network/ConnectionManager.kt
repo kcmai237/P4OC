@@ -41,6 +41,7 @@ class ConnectionManager constructor(
     private val eventMapper: EventMapper,
     private val settingsDataStore: SettingsDataStore,
     private val generationIssuer: () -> ServerGeneration,
+    private val networkUsage: NetworkUsageSink = NetworkUsageSink.None,
 ) {
     companion object {
         private const val TAG = "ConnectionManager"
@@ -364,10 +365,8 @@ class ConnectionManager constructor(
             builder.applyInsecureTls()
         }
 
-        if (BuildConfig.DEBUG) {
-            builder.eventListener(DebugNetworkMetrics.eventListener())
-            builder.addNetworkInterceptor(DebugNetworkMetrics.networkInterceptor())
-        }
+        builder.eventListener(NetworkMetrics.eventListener(networkUsage))
+        builder.addNetworkInterceptor(NetworkMetrics.networkInterceptor(networkUsage))
 
         return builder.build()
     }

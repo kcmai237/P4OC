@@ -93,8 +93,8 @@ Le résiduel ne peut donc pas être présenté comme acquis.
   donc non acquis et doit être ajouté au résiduel si l'on retient la
   fourchette auditée.
 - **Réserve O6/O7** : gains serveur non disponibles ; non comptés.
-- Conditions de mesure : appareil Android réel, `DebugNetworkMetrics`
-  (T001.5), ≥ 3 sessions d'usage représentatif, médiane + CV < 20 %, réseau
+- Conditions de mesure : appareil Android réel, `NetworkMetrics`
+  (T001.5, désormais visible dans l'app), ≥ 3 sessions d'usage représentatif, médiane + CV < 20 %, réseau
   facturé vs Wi-Fi.
 
 **Aucun gain global non mesuré n'est déclaré acquis.**

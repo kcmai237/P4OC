@@ -986,7 +986,13 @@
     <string name="settings_auto_reconnect">Auto-reconnect</string>
     <string name="settings_auto_reconnect_desc">Automatically reconnect when connection drops</string>
     <string name="settings_data_saver">Data saver</string>
-    <string name="settings_data_saver_desc">On metered networks: delays non-essential automatic project and session refreshes. Live chat, messages, terminal, and file transfers are never affected.</string>
+    <string name="settings_data_saver_desc">ON by default on every network: delays non-essential automatic project and session refreshes. Live chat, messages, terminal, and file transfers are never affected.</string>
+    <string name="settings_data_usage_section">Data usage</string>
+    <string name="settings_data_usage_today">Today: %1$s</string>
+    <string name="settings_data_usage_detail">Received %1$s · Sent %2$s · %3$d calls</string>
+    <string name="settings_data_usage_encoding">Content-Encoding observed: %1$s</string>
+    <string name="settings_data_usage_endpoints">Since app start (top 3)</string>
+    <string name="settings_data_usage_reset">Reset counter</string>
     <string name="settings_reconnect_timeout">Reconnect timeout</string>
 
     <!-- Notification permissions -->

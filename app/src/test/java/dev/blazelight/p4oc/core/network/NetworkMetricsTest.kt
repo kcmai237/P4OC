@@ -5,16 +5,16 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
-class DebugNetworkMetricsTest {
+class NetworkMetricsTest {
 
     @Before
     fun setUp() {
-        DebugNetworkMetrics.reset()
+        NetworkMetrics.reset()
     }
 
     @Test
     fun `aggregates request and response bytes per endpoint`() {
-        DebugNetworkMetrics.record(
+        NetworkMetrics.record(
             method = "GET",
             host = "example.test",
             path = "/api/session",
@@ -23,7 +23,7 @@ class DebugNetworkMetricsTest {
             encoding = "gzip",
             protocol = "h2",
         )
-        DebugNetworkMetrics.record(
+        NetworkMetrics.record(
             method = "GET",
             host = "example.test",
             path = "/api/session",
@@ -32,7 +32,7 @@ class DebugNetworkMetricsTest {
             encoding = "gzip",
             protocol = "h2",
         )
-        DebugNetworkMetrics.record(
+        NetworkMetrics.record(
             method = "POST",
             host = "example.test",
             path = "/api/session/{id}/message",
@@ -42,21 +42,21 @@ class DebugNetworkMetricsTest {
             protocol = "http/1.1",
         )
 
-        val summary = DebugNetworkMetrics.summary()
+        val summary = NetworkMetrics.summary()
         println(summary)
 
         assertTrue(summary.contains("GET example.test/api/session req=0B resp=2000B calls=2"))
         assertTrue(summary.contains("POST example.test/api/session/{id}/message req=64B resp=900B"))
         assertTrue(summary.contains("enc=gzip"))
         assertTrue(summary.contains("proto=h2"))
-        assertEquals(2_964L, DebugNetworkMetrics.debugTotalBytes())
+        assertEquals(2_964L, NetworkMetrics.debugTotalBytes())
     }
 
     @Test
     fun `summary is empty of endpoints after reset`() {
-        DebugNetworkMetrics.record("GET", "example.test", "/x", 1, 2, null, "h2")
-        DebugNetworkMetrics.reset()
-        assertTrue(DebugNetworkMetrics.summary().contains("calls=0"))
-        assertTrue(!DebugNetworkMetrics.summary().contains("example.test"))
+        NetworkMetrics.record("GET", "example.test", "/x", 1, 2, null, "h2")
+        NetworkMetrics.reset()
+        assertTrue(NetworkMetrics.summary().contains("calls=0"))
+        assertTrue(!NetworkMetrics.summary().contains("example.test"))
     }
 }
